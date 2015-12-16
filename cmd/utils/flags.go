@@ -651,6 +651,7 @@ func MakeSystemNode(name, version string, extra []byte, ctx *cli.Context) *node.
 		SolcPath:                ctx.GlobalString(SolcPathFlag.Name),
 		AutoDAG:                 ctx.GlobalBool(AutoDAGFlag.Name) || ctx.GlobalBool(MiningEnabledFlag.Name),
 	}
+
 	// Configure the Whisper service
 	shhEnable := ctx.GlobalBool(WhisperEnabledFlag.Name)
 
@@ -704,8 +705,22 @@ func MakeSystemNode(name, version string, extra []byte, ctx *cli.Context) *node.
 	if err != nil {
 		Fatalf("Failed to create the protocol stack: %v", err)
 	}
+
+	var e *eth.Ethereum
+	var fullEth *eth.FullEthereum
 	if err := stack.Register(func(ctx *node.ServiceContext) (node.Service, error) {
-		return eth.New(ctx, ethConf)
+		var err error
+		fullEth, err = eth.NewFullEthereum(ctx, ethConf)
+		if fullEth != nil {
+			e = fullEth.Ethereum
+		}
+		return fullEth, err
+	}); err != nil {
+		Fatalf("Failed to register the Ethereum service: %v", err)
+	}
+
+	if err := stack.Register(func(ctx *node.ServiceContext) (node.Service, error) {
+		return e, nil
 	}); err != nil {
 		Fatalf("Failed to register the Ethereum service: %v", err)
 	}
