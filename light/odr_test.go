@@ -56,7 +56,7 @@ func (odr *testOdr) Retrieve(ctx context.Context, req OdrRequest) error {
 	case *ReceiptsRequest:
 		req.Receipts = core.GetBlockReceipts(odr.sdb, req.Hash)
 	case *TrieRequest:
-		t, _ := trie.New(req.Id.root, odr.sdb)
+		t, _ := trie.New(req.Id.Root, odr.sdb)
 		req.Proof = t.Prove(req.Key)
 		trie.ClearGlobalCache()
 	case *CodeRequest:

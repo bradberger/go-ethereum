@@ -137,6 +137,7 @@ func (self *StateTransition) from() (vm.Account, error) {
 	}
 	return self.state.GetAccount(f), nil
 }
+
 func (self *StateTransition) to() vm.Account {
 	if self.msg == nil {
 		return nil

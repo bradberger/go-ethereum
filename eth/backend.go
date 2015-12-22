@@ -65,6 +65,7 @@ type Config struct {
 	NetworkId int    // Network ID to use for selecting peers to connect to
 	Genesis   string // Genesis JSON to seed the chain database with
 	FastSync  bool   // Enables the state download based fast synchronisation algorithm
+	LightMode bool   // Running in light client mode
 
 	BlockChainVersion  int
 	SkipBcVersionCheck bool // e.g. blockchain export
@@ -121,6 +122,11 @@ type Ethereum struct {
 	netRPCService *PublicNetAPI
 }
 
+type LesServer interface {
+	StartPM()
+	StopPM()
+}
+
 // FullEthereum implements and Ethereum full node backend service.
 type FullEthereum struct {
 	*Ethereum
@@ -128,6 +134,7 @@ type FullEthereum struct {
 	txPool          *core.TxPool
 	blockchain      *core.BlockChain
 	protocolManager *ProtocolManager
+	ls              LesServer
 
 	GpoMinGasPrice          *big.Int
 	GpoMaxGasPrice          *big.Int
@@ -142,6 +149,10 @@ type FullEthereum struct {
 	AutoDAG      bool
 	autodagquit  chan bool
 	etherbase    common.Address
+}
+
+func (s *FullEthereum) AddLesServer(ls LesServer) {
+	s.ls = ls
 }
 
 // NewEthereum creates a new Ethereum object
@@ -459,6 +470,9 @@ func (s *FullEthereum) Start(srvr *p2p.Server) error {
 		s.StartAutoDAG()
 	}
 	s.protocolManager.Start()
+	if s.ls != nil {
+		s.ls.StartPM()
+	}
 	return nil
 }
 
@@ -482,6 +496,9 @@ func (s *Ethereum) Shutdown() error {
 func (s *FullEthereum) Stop() error {
 	s.blockchain.Stop()
 	s.protocolManager.Stop()
+	if s.ls != nil {
+		s.ls.StopPM()
+	}
 	s.txPool.Stop()
 
 	s.StopAutoDAG()

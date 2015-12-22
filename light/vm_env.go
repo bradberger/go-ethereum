@@ -142,6 +142,10 @@ func (s *VMState) errHandler(err error) {
 func (s *VMState) GetAccount(addr common.Address) vm.Account {
 	so, err := s.state.GetStateObject(s.ctx, addr)
 	s.errHandler(err)
+	if err != nil {
+		// return a dummy state object to avoid panics
+		so = s.state.newStateObject(addr)
+	}
 	return so
 }
 
@@ -149,6 +153,10 @@ func (s *VMState) GetAccount(addr common.Address) vm.Account {
 func (s *VMState) CreateAccount(addr common.Address) vm.Account {
 	so, err := s.state.CreateStateObject(s.ctx, addr)
 	s.errHandler(err)
+	if err != nil {
+		// return a dummy state object to avoid panics
+		so = s.state.newStateObject(addr)
+	}
 	return so
 }
 

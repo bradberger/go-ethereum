@@ -70,11 +70,11 @@ func (b *EthApiBackend) StateByNumber(blockNr rpc.BlockNumber) (ApiState, error)
 		return &EthApiState{b.eth.miner.PendingState()}, nil
 	}
 	// Otherwise resolve the block number and return its state
-	block, _ := b.BlockByNumber(context.Background(), blockNr)
-	if block == nil {
+	header := b.HeaderByNumber(blockNr)
+	if header == nil {
 		return nil, nil
 	}
-	stateDb, err := state.New(block.Root(), b.eth.chainDb)
+	stateDb, err := state.New(header.Root, b.eth.chainDb)
 	return &EthApiState{stateDb}, err
 }
 
