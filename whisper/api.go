@@ -19,6 +19,7 @@ package whisper
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -97,13 +98,13 @@ func (s *PublicWhisperAPI) AddIdentity(identity string) (string, error) {
 		return "", whisperOffLineErr
 	}
 
-	key, err := crypto.HexToECDSA(string(identity))
+	key, err := crypto.HexToECDSA(strings.TrimPrefix(identity, "0x"))
 	if err != nil {
 		return "", err
 	}
 
 	s.w.AddIdentity(key)
-	return identity, nil
+	return common.ToHex(crypto.FromECDSA(key)), nil
 }
 
 type NewFilterArgs struct {
