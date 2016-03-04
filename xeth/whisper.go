@@ -19,6 +19,7 @@
 package xeth
 
 import (
+	"crypto/ecdsa"
 	"fmt"
 	"time"
 
@@ -45,6 +46,10 @@ func NewWhisper(w *whisper.Whisper) *Whisper {
 func (self *Whisper) NewIdentity() string {
 	identity := self.Whisper.NewIdentity()
 	return common.ToHex(crypto.FromECDSAPub(&identity.PublicKey))
+}
+
+func (self *Whisper) GetIdentify(pub *ecdsa.PublicKey) *ecdsa.PrivateKey {
+	return self.Whisper.GetIdentity(pub)
 }
 
 // HasIdentity checks if the the whisper node is configured with the private key

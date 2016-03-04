@@ -120,6 +120,16 @@ func (self *Whisper) NewIdentity() *ecdsa.PrivateKey {
 	return key
 }
 
+// AddIdentity adds the private key to the map of keys
+func (self *Whisper) AddIdentity(key *ecdsa.PrivateKey) *ecdsa.PrivateKey {
+
+	pub := ecdsa.PublicKey{Curve: crypto.S256()}
+	pub.X, pub.Y = crypto.S256().ScalarBaseMult(crypto.FromECDSA(key))
+
+	self.keys[string(crypto.FromECDSAPub(&pub))] = key
+	return key
+}
+
 // HasIdentity checks if the the whisper node is configured with the private key
 // of the specified public pair.
 func (self *Whisper) HasIdentity(key *ecdsa.PublicKey) bool {

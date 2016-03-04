@@ -19,6 +19,8 @@ package api
 import (
 	"math/big"
 
+	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/eth"
 	"github.com/ethereum/go-ethereum/rpc/codec"
 	"github.com/ethereum/go-ethereum/rpc/shared"
@@ -36,6 +38,8 @@ var (
 		"shh_post":             (*shhApi).Post,
 		"shh_hasIdentity":      (*shhApi).HasIdentity,
 		"shh_newIdentity":      (*shhApi).NewIdentity,
+		"shh_createIdentity":   (*shhApi).CreateIdentity,
+		"shh_addIdentity":      (*shhApi).AddIdentity,
 		"shh_newFilter":        (*shhApi).NewFilter,
 		"shh_uninstallFilter":  (*shhApi).UninstallFilter,
 		"shh_getMessages":      (*shhApi).GetMessages,
@@ -145,6 +149,42 @@ func (self *shhApi) NewIdentity(req *shared.Request) (interface{}, error) {
 	}
 
 	return w.NewIdentity(), nil
+}
+
+// CreateIdentity is a clone of the NewIdentity method, only it must return an array of [<publickey>,<privatekey>].
+// The private key is in the standard ASN.1, DER format
+func (self *shhApi) CreateIdentity(req *shared.Request) (interface{}, error) {
+
+	w := self.xeth.Whisper()
+	if w == nil {
+		return nil, newWhisperOfflineError(req.Method)
+	}
+
+	pub := w.NewIdentity()
+	pubKey := crypto.ToECDSAPub([]byte(pub))
+	prvKey := w.GetIdentity(pubKey)
+	prv := common.ToHex(crypto.FromECDSA(prvKey))
+
+	return []string{pub, prv}, nil
+}
+
+// AddIdentity should insert the identity with the given private key into the "whisper.Whisper".map
+func (self *shhApi) AddIdentity(req *shared.Request) (interface{}, error) {
+
+	w := self.xeth.Whisper()
+	if w == nil {
+		return nil, newWhisperOfflineError(req.Method)
+	}
+
+	// Parse the key from the input params. The request body should
+	// be the hex encoded private key.
+	key, err := crypto.HexToECDSA(string(req.Params))
+	if err != nil {
+		return nil, err
+	}
+
+	w.AddIdentity(key)
+	return key, nil
 }
 
 func (self *shhApi) NewFilter(req *shared.Request) (interface{}, error) {
