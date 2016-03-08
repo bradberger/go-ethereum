@@ -40,6 +40,12 @@ const (
 	httpReadDeadLine = 60 * time.Second // wait max httpReadDeadeline for next request
 )
 
+var proxyDisabledMethods = []string{
+	"shh_sendTransaction",
+	"shh_createIdentity",
+	"shh_addIdentity",
+}
+
 // httpMessageStream is the glue between a HTTP connection which is message based
 // and the RPC codecs that expect json requests to be read from a stream. It will
 // parse HTTP messages and offer the bodies of these requests as a stream through
@@ -54,7 +60,7 @@ type httpMessageStream struct {
 	origin           string            // origin of this connection/request
 }
 
-// NewHttpMessageStream will create a new http message stream parser that can be
+// NewHTTPMessageStream will create a new http message stream parser that can be
 // used by the codes in the RPC package. It will take full control of the given
 // connection and thus needs to be hijacked. It will read and write HTTP messages
 // from the passed rwbuf. The allowed origins are the RPC CORS domains the user has supplied.
@@ -226,6 +232,26 @@ type httpConnHijacker struct {
 // HttpMessageStream which is then used as codec.
 func (h *httpConnHijacker) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	if h.proxy != nil {
+
+		var bodyBytes []byte
+		var err error
+		if req.Body != nil {
+			bodyBytes, err = ioutil.ReadAll(req.Body)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+		}
+		// Restore the io.ReadCloser to its original state
+		req.Body = ioutil.NopCloser(bytes.NewBuffer(bodyBytes))
+		bodyString := string(bodyBytes)
+		for _, m := range proxyDisabledMethods {
+			if strings.Contains(bodyString, m) {
+				http.Error(w, fmt.Sprintf("%s method is disabled", m), http.StatusBadRequest)
+				return
+			}
+		}
+
 		h.proxy.ServeHTTP(w, req)
 		return
 	}
