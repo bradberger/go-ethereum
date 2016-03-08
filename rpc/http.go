@@ -225,8 +225,6 @@ type httpConnHijacker struct {
 // ServeHTTP will hijack the connection, wraps the captured connection in a
 // HttpMessageStream which is then used as codec.
 func (h *httpConnHijacker) ServeHTTP(w http.ResponseWriter, req *http.Request) {
-
-	// If proxy URL is defined, then use it here.
 	if h.proxy != nil {
 		h.proxy.ServeHTTP(w, req)
 		return
