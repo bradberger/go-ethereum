@@ -25,6 +25,7 @@ import (
 	"io/ioutil"
 	"net"
 	"net/http"
+	"net/http/httputil"
 	"net/url"
 	"strconv"
 	"strings"
@@ -218,11 +219,19 @@ func httpTimestamp(t time.Time) []byte {
 type httpConnHijacker struct {
 	corsdomains []string
 	rpcServer   *Server
+	proxy       *httputil.ReverseProxy
 }
 
 // ServeHTTP will hijack the connection, wraps the captured connection in a
 // HttpMessageStream which is then used as codec.
 func (h *httpConnHijacker) ServeHTTP(w http.ResponseWriter, req *http.Request) {
+
+	// If proxy URL is defined, then use it here.
+	if h.proxy != nil {
+		h.proxy.ServeHTTP(w, req)
+		return
+	}
+
 	hj, ok := w.(http.Hijacker)
 	if !ok {
 		http.Error(w, "webserver doesn't support hijacking", http.StatusInternalServerError)
@@ -247,6 +256,17 @@ func NewHTTPServer(cors string, handler *Server) *http.Server {
 		Handler: &httpConnHijacker{
 			corsdomains: strings.Split(cors, ","),
 			rpcServer:   handler,
+		},
+	}
+}
+
+// NewHTTPProxyServer creates a new HTTP RPC server proxy around an API provider.
+func NewHTTPProxyServer(target *url.URL, cors string, handler *Server) *http.Server {
+	return &http.Server{
+		Handler: &httpConnHijacker{
+			corsdomains: strings.Split(cors, ","),
+			rpcServer:   handler,
+			proxy:  httputil.NewSingleHostReverseProxy(target),
 		},
 	}
 }

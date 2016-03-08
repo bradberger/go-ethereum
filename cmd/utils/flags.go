@@ -239,6 +239,11 @@ var (
 		Usage: "HTTP-RPC server listening port",
 		Value: common.DefaultHTTPPort,
 	}
+	RPCProxyFlag = cli.StringFlag{
+		Name: "rpcproxy",
+		Usage: "HTTP-RPC proxy address",
+		Value: "",
+	}
 	RPCCORSDomainFlag = cli.StringFlag{
 		Name:  "rpccorsdomain",
 		Usage: "Domains from which to accept cross origin requests (browser enforced)",
@@ -620,6 +625,7 @@ func MakeSystemNode(name, version string, extra []byte, ctx *cli.Context) *node.
 		HTTPHost:        MakeHTTPRpcHost(ctx),
 		HTTPPort:        ctx.GlobalInt(RPCPortFlag.Name),
 		HTTPCors:        ctx.GlobalString(RPCCORSDomainFlag.Name),
+		HTTPProxy:       ctx.GlobalString(RPCProxyFlag.Name),
 		HTTPModules:     strings.Split(ctx.GlobalString(RPCApiFlag.Name), ","),
 		WSHost:          MakeWSRpcHost(ctx),
 		WSPort:          ctx.GlobalInt(WSPortFlag.Name),
@@ -710,7 +716,10 @@ func MakeSystemNode(name, version string, extra []byte, ctx *cli.Context) *node.
 		Fatalf("Failed to register the Ethereum service: %v", err)
 	}
 	if shhEnable {
-		if err := stack.Register(func(*node.ServiceContext) (node.Service, error) { return whisper.New(), nil }); err != nil {
+		if err := stack.Register(func(*node.ServiceContext) (node.Service, error) {
+			w := whisper.New()
+			return w, nil
+		}); err != nil {
 			Fatalf("Failed to register the Whisper service: %v", err)
 		}
 	}
