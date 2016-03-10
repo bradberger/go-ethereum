@@ -41,7 +41,6 @@ const (
 )
 
 var proxyDisabledMethods = []string{
-	"shh_sendTransaction",
 	"shh_createIdentity",
 	"shh_addIdentity",
 }
@@ -226,33 +225,204 @@ type httpConnHijacker struct {
 	corsdomains []string
 	rpcServer   *Server
 	proxy       *httputil.ReverseProxy
+	// src is where the node is listening at. It's only when we need to run commands
+	// locally before sending them to the proxy.
+	src         string
+}
+
+func sendError(w http.ResponseWriter, msg string, r *JSONRequest, ) {
+
+	glog.V(logger.Info).Infof("Error: %s", msg)
+
+	if r != nil {
+		e := JSONErrResponse{r.Version, r.Id, JSONError{-32600, msg, nil}}
+		body, err := json.Marshal(e)
+		if err == nil {
+			http.Error(w, string(body), http.StatusBadRequest)
+			return
+		}
+	}
+
+	http.Error(w, msg, http.StatusBadRequest)
+
+}
+
+func sameAddr(src, dst string) (bool, error) {
+
+	prefixes := []string{"http://", "https://", "tcp://"}
+	for _, p := range prefixes {
+		src = strings.TrimPrefix(src, p)
+		dst = strings.TrimPrefix(dst, p)
+	}
+
+	local, _, err := net.SplitHostPort(src)
+	if err != nil {
+		local = src
+	}
+
+	remote, _, err := net.SplitHostPort(dst)
+	if err != nil {
+		remote = dst
+	}
+
+	localIP, err := net.LookupIP(local)
+	if err != nil {
+		return false, err
+	}
+
+	remoteIP, err := net.LookupIP(remote)
+	if err != nil {
+		return false, err
+	}
+
+	for _, l := range localIP {
+		for _, r := range remoteIP {
+			if bytes.Equal(l, r) {
+				return true, nil
+			}
+		}
+	}
+
+	return false, nil
+
+}
+
+func isErrorResponse(resp []byte) bool {
+	var jsonErr JSONError
+	err := json.Unmarshal(resp, &jsonErr)
+	return err == nil
+}
+
+func (h *httpConnHijacker) useProxy(req *http.Request) bool {
+
+	useProxy := h.proxy != nil && h.src != ""
+	if useProxy {
+
+		fromAddr := req.RemoteAddr
+		if req.Header.Get("X-Forwarded-For") != "" {
+			fromAddr = req.Header.Get("X-Forwarded-For")
+		}
+
+		same, err := sameAddr(h.src, fromAddr)
+		if err != nil {
+			return false
+		}
+
+		useProxy = !same
+
+	}
+
+	return useProxy
+
+}
+
+func (h *httpConnHijacker) ServeHTTPProxy(w http.ResponseWriter, req *http.Request) {
+
+	if req.Body != nil {
+
+		var r JSONRequest
+
+		bodyBytes, err := ioutil.ReadAll(req.Body)
+		if err != nil {
+			glog.V(logger.Info).Infof("Error: %v", err)
+			sendError(w, "Invalid body", nil)
+			return
+		}
+
+		if err := json.Unmarshal(bodyBytes, &r); err != nil {
+			glog.V(logger.Info).Infof("Error: %v", err)
+			sendError(w, "Invalid format", nil)
+			return
+		}
+
+		glog.V(logger.Info).Infof("Got body: %s", string(bodyBytes))
+
+		for _, m := range proxyDisabledMethods {
+			if r.Method == m {
+				glog.V(logger.Info).Infof("Error: %s", fmt.Sprintf("Method %s is disabled", m))
+				sendError(w, fmt.Sprintf("%s is disabled", m), &r)
+				return
+			}
+		}
+
+		// eth_sendTransaction => eth_sendRawTransaction
+		if r.Method == "eth_sendTransaction" {
+
+			// Copy the original request, and send it locally.
+			glog.V(logger.Info).Infof("Sending locally: %s", string(bodyBytes))
+
+			resp, err := http.Post(h.src, "application/json", bytes.NewBuffer(bodyBytes))
+			if err != nil {
+				glog.V(logger.Info).Infof("Error: %v", err)
+				sendError(w, err.Error(), &r)
+				return
+			}
+
+			respBody, err := ioutil.ReadAll(resp.Body)
+			if err != nil {
+				glog.V(logger.Info).Infof("Error: %v", err)
+				sendError(w, err.Error(), &r)
+				return
+			}
+
+			glog.V(logger.Info).Infof("Got body from proxy: %s", string(respBody))
+
+			// Check first to see if it's an error, and send it back directly if it is.
+			if isErrorResponse(respBody) {
+				sendError(w, string(respBody), nil)
+				return
+			}
+
+			var respJSON JSONSuccessResponse
+			err = json.Unmarshal(respBody, &respJSON)
+			if err != nil {
+				glog.V(logger.Info).Infof("Error: %v %v", err, respJSON)
+				sendError(w, err.Error(), &r)
+				return
+			}
+
+			// If no error, we have a signed transaction.
+			// Decode the current request to get ID, etc.
+			// Then create a eth_sendRawTransaction JSON body and send it to the proxy, returning the result.
+			payload := []interface{}{respJSON.Result}
+			payloadBytes, _ := json.Marshal(payload)
+			newReqBody := JSONRequest{
+				Method: "eth_sendRawTransaction",
+				Version: r.Version,
+				Id: r.Id,
+				Payload: payloadBytes,
+			}
+
+			glog.V(logger.Info).Infof("Sending request to proxy: %+v %x", newReqBody, newReqBody.Payload)
+
+			bodyBytes, err = json.Marshal(newReqBody)
+			if err != nil {
+				glog.V(logger.Info).Infof("Error: %v", err)
+				sendError(w, err.Error(), &r)
+				return
+			}
+
+			// Need to update the content length since it changed.
+			req.ContentLength = int64(len(bodyBytes))
+
+		}
+
+		// Restore the io.ReadCloser to its original state
+		req.Body = ioutil.NopCloser(bytes.NewBuffer(bodyBytes))
+
+	}
+
+	h.proxy.ServeHTTP(w, req)
+	return
+
 }
 
 // ServeHTTP will hijack the connection, wraps the captured connection in a
 // HttpMessageStream which is then used as codec.
 func (h *httpConnHijacker) ServeHTTP(w http.ResponseWriter, req *http.Request) {
-	if h.proxy != nil {
 
-		var bodyBytes []byte
-		var err error
-		if req.Body != nil {
-			bodyBytes, err = ioutil.ReadAll(req.Body)
-			if err != nil {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
-				return
-			}
-		}
-		// Restore the io.ReadCloser to its original state
-		req.Body = ioutil.NopCloser(bytes.NewBuffer(bodyBytes))
-		bodyString := string(bodyBytes)
-		for _, m := range proxyDisabledMethods {
-			if strings.Contains(bodyString, m) {
-				http.Error(w, fmt.Sprintf("%s method is disabled", m), http.StatusBadRequest)
-				return
-			}
-		}
-
-		h.proxy.ServeHTTP(w, req)
+	if h.useProxy(req) {
+		h.ServeHTTPProxy(w, req)
 		return
 	}
 
@@ -285,12 +455,13 @@ func NewHTTPServer(cors string, handler *Server) *http.Server {
 }
 
 // NewHTTPProxyServer creates a new HTTP RPC server proxy around an API provider.
-func NewHTTPProxyServer(target *url.URL, cors string, handler *Server) *http.Server {
+func NewHTTPProxyServer(target *url.URL, src string, cors string, handler *Server) *http.Server {
 	return &http.Server{
 		Handler: &httpConnHijacker{
 			corsdomains: strings.Split(cors, ","),
 			rpcServer:   handler,
-			proxy:  httputil.NewSingleHostReverseProxy(target),
+			proxy:       httputil.NewSingleHostReverseProxy(target),
+			src:         src,
 		},
 	}
 }
