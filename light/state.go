@@ -194,7 +194,7 @@ func (self *LightState) GetStateObject(ctx context.Context, addr common.Address)
 		return nil, nil
 	}
 
-	stateObject, err = DecodeObject(ctx, addr, self.odr, []byte(data))
+	stateObject, err = DecodeObject(ctx, self.id, addr, self.odr, []byte(data))
 	if err != nil {
 		return nil, err
 	}

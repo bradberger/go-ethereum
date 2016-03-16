@@ -36,6 +36,7 @@ import (
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/core/vm"
 	"github.com/ethereum/go-ethereum/crypto"
+	"github.com/ethereum/go-ethereum/eth/downloader"
 	"github.com/ethereum/go-ethereum/ethdb"
 	"github.com/ethereum/go-ethereum/event"
 	"github.com/ethereum/go-ethereum/logger"
@@ -44,65 +45,80 @@ import (
 	"github.com/ethereum/go-ethereum/p2p"
 	"github.com/ethereum/go-ethereum/rlp"
 	"github.com/ethereum/go-ethereum/rpc"
+	"golang.org/x/net/context"
 	"gopkg.in/fatih/set.v0"
 )
 
-const defaultGas = uint64(90000)
-
-// blockByNumber is a commonly used helper function which retrieves and returns
-// the block for the given block number, capable of handling two special blocks:
-// rpc.LatestBlockNumber adn rpc.PendingBlockNumber. It returns nil when no block
-// could be found.
-func blockByNumber(m *miner.Miner, bc *core.BlockChain, blockNr rpc.BlockNumber) *types.Block {
-	// Pending block is only known by the miner
-	if blockNr == rpc.PendingBlockNumber {
-		return m.PendingBlock()
-	}
-	// Otherwise resolve and return the block
-	if blockNr == rpc.LatestBlockNumber {
-		return bc.CurrentBlock()
-	}
-	return bc.GetBlockByNumber(uint64(blockNr))
+// ApiBackend interface provides the common API services (that are provided by
+// both full and light clients) with access to necessary functions.
+type ApiBackend interface {
+	// general Ethereum API
+	Solc() (*compiler.Solidity, error)
+	SetSolc(solcPath string) (*compiler.Solidity, error)
+	Downloader() *downloader.Downloader
+	ProtocolVersion() int
+	SuggestPrice() *big.Int
+	// BlockChain API
+	SetHead(number uint64)
+	HeaderByNumber(blockNr rpc.BlockNumber) *types.Header
+	BlockByNumber(ctx context.Context, blockNr rpc.BlockNumber) (*types.Block, error)
+	StateByNumber(blockNr rpc.BlockNumber) (ApiState, error)
+	GetBlock(ctx context.Context, blockHash common.Hash) (*types.Block, error)
+	GetTd(blockHash common.Hash) *big.Int
+	GetVMEnv(ctx context.Context, msg core.Message, header *types.Header) (vm.Environment, func() error, error)
+	// TxPool API
+	SendTx(ctx context.Context, signedTx *types.Transaction) error
+	RemoveTx(txHash common.Hash)
+	GetPoolTransactions() types.Transactions
+	GetPoolTransaction(txHash common.Hash) *types.Transaction
+	GetPoolNonce(ctx context.Context, addr common.Address) (uint64, error)
+	Stats() (pending int, queued int)
+	TxPoolContent() (map[common.Address]map[uint64][]*types.Transaction, map[common.Address]map[uint64][]*types.Transaction)
 }
 
-// stateAndBlockByNumber is a commonly used helper function which retrieves and
-// returns the state and containing block for the given block number, capable of
-// handling two special states: rpc.LatestBlockNumber adn rpc.PendingBlockNumber.
-// It returns nil when no block or state could be found.
-func stateAndBlockByNumber(m *miner.Miner, bc *core.BlockChain, blockNr rpc.BlockNumber, chainDb ethdb.Database) (*state.StateDB, *types.Block, error) {
-	// Pending state is only known by the miner
-	if blockNr == rpc.PendingBlockNumber {
-		return m.PendingState(), m.PendingBlock(), nil
-	}
-	// Otherwise resolve the block number and return its state
-	block := blockByNumber(m, bc, blockNr)
-	if block == nil {
-		return nil, nil, nil
-	}
-	stateDb, err := state.New(block.Root(), chainDb)
-	return stateDb, block, err
+type ApiState interface {
+	GetBalance(ctx context.Context, addr common.Address) (*big.Int, error)
+	GetCode(ctx context.Context, addr common.Address) ([]byte, error)
+	GetState(ctx context.Context, a common.Address, b common.Hash) (common.Hash, error)
+	GetNonce(ctx context.Context, addr common.Address) (uint64, error)
 }
+
+const (
+	defaultGasPrice = uint64(10000000000000)
+	defaultGas      = uint64(90000)
+)
 
 // PublicEthereumAPI provides an API to access Ethereum related information.
 // It offers only methods that operate on public data that is freely available to anyone.
 type PublicEthereumAPI struct {
-	e   *Ethereum
+	b ApiBackend
+}
+
+// PublicFullEthereumAPI provides an API to access Ethereum full node-related
+// information.
+type PublicFullEthereumAPI struct {
+	e   *FullEthereum
 	gpo *GasPriceOracle
 }
 
 // NewPublicEthereumAPI creates a new Etheruem protocol API.
-func NewPublicEthereumAPI(e *Ethereum) *PublicEthereumAPI {
-	return &PublicEthereumAPI{e, NewGasPriceOracle(e)}
+func NewPublicEthereumAPI(b ApiBackend) *PublicEthereumAPI {
+	return &PublicEthereumAPI{b}
+}
+
+// NewPublicFullEthereumAPI creates a new Etheruem protocol API for full nodes.
+func NewPublicFullEthereumAPI(e *FullEthereum, gpo *GasPriceOracle) *PublicFullEthereumAPI {
+	return &PublicFullEthereumAPI{e, gpo}
 }
 
 // GasPrice returns a suggestion for a gas price.
-func (s *PublicEthereumAPI) GasPrice() *big.Int {
+func (s *PublicFullEthereumAPI) GasPrice() *big.Int {
 	return s.gpo.SuggestPrice()
 }
 
 // GetCompilers returns the collection of available smart contract compilers
 func (s *PublicEthereumAPI) GetCompilers() ([]string, error) {
-	solc, err := s.e.Solc()
+	solc, err := s.b.Solc()
 	if err != nil {
 		return nil, err
 	}
@@ -116,7 +132,7 @@ func (s *PublicEthereumAPI) GetCompilers() ([]string, error) {
 
 // CompileSolidity compiles the given solidity source
 func (s *PublicEthereumAPI) CompileSolidity(source string) (map[string]*compiler.Contract, error) {
-	solc, err := s.e.Solc()
+	solc, err := s.b.Solc()
 	if err != nil {
 		return nil, err
 	}
@@ -129,22 +145,22 @@ func (s *PublicEthereumAPI) CompileSolidity(source string) (map[string]*compiler
 }
 
 // Etherbase is the address that mining rewards will be send to
-func (s *PublicEthereumAPI) Etherbase() (common.Address, error) {
+func (s *PublicFullEthereumAPI) Etherbase() (common.Address, error) {
 	return s.e.Etherbase()
 }
 
 // see Etherbase
-func (s *PublicEthereumAPI) Coinbase() (common.Address, error) {
+func (s *PublicFullEthereumAPI) Coinbase() (common.Address, error) {
 	return s.Etherbase()
 }
 
 // ProtocolVersion returns the current Ethereum protocol version this node supports
 func (s *PublicEthereumAPI) ProtocolVersion() *rpc.HexNumber {
-	return rpc.NewHexNumber(s.e.EthVersion())
+	return rpc.NewHexNumber(s.b.ProtocolVersion())
 }
 
 // Hashrate returns the POW hashrate
-func (s *PublicEthereumAPI) Hashrate() *rpc.HexNumber {
+func (s *PublicFullEthereumAPI) Hashrate() *rpc.HexNumber {
 	return rpc.NewHexNumber(s.e.Miner().HashRate())
 }
 
@@ -156,7 +172,7 @@ func (s *PublicEthereumAPI) Hashrate() *rpc.HexNumber {
 // - pulledStates:  number of state entries processed until now
 // - knownStates:   number of known state entries that still need to be pulled
 func (s *PublicEthereumAPI) Syncing() (interface{}, error) {
-	origin, current, height, pulled, known := s.e.Downloader().Progress()
+	origin, current, height, pulled, known := s.b.Downloader().Progress()
 
 	// Return not syncing if the synchronisation already completed
 	if current >= height {
@@ -175,12 +191,12 @@ func (s *PublicEthereumAPI) Syncing() (interface{}, error) {
 // PublicMinerAPI provides an API to control the miner.
 // It offers only methods that operate on data that pose no security risk when it is publicly accessible.
 type PublicMinerAPI struct {
-	e     *Ethereum
+	e     *FullEthereum
 	agent *miner.RemoteAgent
 }
 
 // NewPublicMinerAPI create a new PublicMinerAPI instance.
-func NewPublicMinerAPI(e *Ethereum) *PublicMinerAPI {
+func NewPublicMinerAPI(e *FullEthereum) *PublicMinerAPI {
 	agent := miner.NewRemoteAgent()
 	e.Miner().Register(agent)
 
@@ -227,11 +243,11 @@ func (s *PublicMinerAPI) SubmitHashrate(hashrate rpc.HexNumber, id common.Hash) 
 // PrivateMinerAPI provides private RPC methods to control the miner.
 // These methods can be abused by external users and must be considered insecure for use by untrusted users.
 type PrivateMinerAPI struct {
-	e *Ethereum
+	e *FullEthereum
 }
 
 // NewPrivateMinerAPI create a new RPC service which controls the miner of this node.
-func NewPrivateMinerAPI(e *Ethereum) *PrivateMinerAPI {
+func NewPrivateMinerAPI(e *FullEthereum) *PrivateMinerAPI {
 	return &PrivateMinerAPI{e: e}
 }
 
@@ -294,12 +310,12 @@ func (s *PrivateMinerAPI) MakeDAG(blockNr rpc.BlockNumber) (bool, error) {
 
 // PublicTxPoolAPI offers and API for the transaction pool. It only operates on data that is non confidential.
 type PublicTxPoolAPI struct {
-	e *Ethereum
+	b ApiBackend
 }
 
 // NewPublicTxPoolAPI creates a new tx pool service that gives information about the transaction pool.
-func NewPublicTxPoolAPI(e *Ethereum) *PublicTxPoolAPI {
-	return &PublicTxPoolAPI{e}
+func NewPublicTxPoolAPI(b ApiBackend) *PublicTxPoolAPI {
+	return &PublicTxPoolAPI{b}
 }
 
 // Content returns the transactions contained within the transaction pool.
@@ -308,7 +324,7 @@ func (s *PublicTxPoolAPI) Content() map[string]map[string]map[string][]*RPCTrans
 		"pending": make(map[string]map[string][]*RPCTransaction),
 		"queued":  make(map[string]map[string][]*RPCTransaction),
 	}
-	pending, queue := s.e.TxPool().Content()
+	pending, queue := s.b.TxPoolContent()
 
 	// Flatten the pending transactions
 	for account, batches := range pending {
@@ -337,7 +353,7 @@ func (s *PublicTxPoolAPI) Content() map[string]map[string]map[string][]*RPCTrans
 
 // Status returns the number of pending and queued transaction in the pool.
 func (s *PublicTxPoolAPI) Status() map[string]*rpc.HexNumber {
-	pending, queue := s.e.TxPool().Stats()
+	pending, queue := s.b.Stats()
 	return map[string]*rpc.HexNumber{
 		"pending": rpc.NewHexNumber(pending),
 		"queued":  rpc.NewHexNumber(queue),
@@ -351,7 +367,7 @@ func (s *PublicTxPoolAPI) Inspect() map[string]map[string]map[string][]string {
 		"pending": make(map[string]map[string][]string),
 		"queued":  make(map[string]map[string][]string),
 	}
-	pending, queue := s.e.TxPool().Content()
+	pending, queue := s.b.TxPoolContent()
 
 	// Define a formatter to flatten a transaction into a string
 	var format = func(tx *types.Transaction) string {
@@ -453,38 +469,38 @@ func (s *PrivateAccountAPI) LockAccount(addr common.Address) bool {
 // PublicBlockChainAPI provides an API to access the Ethereum blockchain.
 // It offers only methods that operate on public data that is freely available to anyone.
 type PublicBlockChainAPI struct {
-	bc       *core.BlockChain
-	chainDb  ethdb.Database
+	b        ApiBackend
 	eventMux *event.TypeMux
 	am       *accounts.Manager
-	miner    *miner.Miner
 }
 
 // NewPublicBlockChainAPI creates a new Etheruem blockchain API.
-func NewPublicBlockChainAPI(bc *core.BlockChain, m *miner.Miner, chainDb ethdb.Database, eventMux *event.TypeMux, am *accounts.Manager) *PublicBlockChainAPI {
-	return &PublicBlockChainAPI{bc: bc, miner: m, chainDb: chainDb, eventMux: eventMux, am: am}
+func NewPublicBlockChainAPI(b ApiBackend, eventMux *event.TypeMux, am *accounts.Manager) *PublicBlockChainAPI {
+	return &PublicBlockChainAPI{b: b, eventMux: eventMux, am: am}
 }
 
 // BlockNumber returns the block number of the chain head.
 func (s *PublicBlockChainAPI) BlockNumber() *big.Int {
-	return s.bc.CurrentHeader().Number
+	return s.b.HeaderByNumber(rpc.LatestBlockNumber).Number
 }
 
 // GetBalance returns the amount of wei for the given address in the state of the
 // given block number. The rpc.LatestBlockNumber and rpc.PendingBlockNumber meta
 // block numbers are also allowed.
-func (s *PublicBlockChainAPI) GetBalance(address common.Address, blockNr rpc.BlockNumber) (*big.Int, error) {
-	state, _, err := stateAndBlockByNumber(s.miner, s.bc, blockNr, s.chainDb)
+func (s *PublicBlockChainAPI) GetBalance(ctx context.Context, address common.Address, blockNr rpc.BlockNumber) (*big.Int, error) {
+	state, err := s.b.StateByNumber(blockNr)
 	if state == nil || err != nil {
 		return nil, err
 	}
-	return state.GetBalance(address), nil
+
+	return state.GetBalance(ctx, address)
 }
 
 // GetBlockByNumber returns the requested block. When blockNr is -1 the chain head is returned. When fullTx is true all
 // transactions in the block are returned in full detail, otherwise only the transaction hash is returned.
-func (s *PublicBlockChainAPI) GetBlockByNumber(blockNr rpc.BlockNumber, fullTx bool) (map[string]interface{}, error) {
-	if block := blockByNumber(s.miner, s.bc, blockNr); block != nil {
+func (s *PublicBlockChainAPI) GetBlockByNumber(ctx context.Context, blockNr rpc.BlockNumber, fullTx bool) (map[string]interface{}, error) {
+	block, err := s.b.BlockByNumber(ctx, blockNr)
+	if block != nil {
 		response, err := s.rpcOutputBlock(block, true, fullTx)
 		if err == nil && blockNr == rpc.PendingBlockNumber {
 			// Pending blocks need to nil out a few fields
@@ -494,22 +510,24 @@ func (s *PublicBlockChainAPI) GetBlockByNumber(blockNr rpc.BlockNumber, fullTx b
 		}
 		return response, err
 	}
-	return nil, nil
+	return nil, err
 }
 
 // GetBlockByHash returns the requested block. When fullTx is true all transactions in the block are returned in full
 // detail, otherwise only the transaction hash is returned.
-func (s *PublicBlockChainAPI) GetBlockByHash(blockHash common.Hash, fullTx bool) (map[string]interface{}, error) {
-	if block := s.bc.GetBlock(blockHash); block != nil {
+func (s *PublicBlockChainAPI) GetBlockByHash(ctx context.Context, blockHash common.Hash, fullTx bool) (map[string]interface{}, error) {
+	block, err := s.b.GetBlock(ctx, blockHash)
+	if block != nil {
 		return s.rpcOutputBlock(block, true, fullTx)
 	}
-	return nil, nil
+	return nil, err
 }
 
 // GetUncleByBlockNumberAndIndex returns the uncle block for the given block hash and index. When fullTx is true
 // all transactions in the block are returned in full detail, otherwise only the transaction hash is returned.
-func (s *PublicBlockChainAPI) GetUncleByBlockNumberAndIndex(blockNr rpc.BlockNumber, index rpc.HexNumber) (map[string]interface{}, error) {
-	if block := blockByNumber(s.miner, s.bc, blockNr); block != nil {
+func (s *PublicBlockChainAPI) GetUncleByBlockNumberAndIndex(ctx context.Context, blockNr rpc.BlockNumber, index rpc.HexNumber) (map[string]interface{}, error) {
+	block, err := s.b.BlockByNumber(ctx, blockNr)
+	if block != nil {
 		uncles := block.Uncles()
 		if index.Int() < 0 || index.Int() >= len(uncles) {
 			glog.V(logger.Debug).Infof("uncle block on index %d not found for block #%d", index.Int(), blockNr)
@@ -518,13 +536,14 @@ func (s *PublicBlockChainAPI) GetUncleByBlockNumberAndIndex(blockNr rpc.BlockNum
 		block = types.NewBlockWithHeader(uncles[index.Int()])
 		return s.rpcOutputBlock(block, false, false)
 	}
-	return nil, nil
+	return nil, err
 }
 
 // GetUncleByBlockHashAndIndex returns the uncle block for the given block hash and index. When fullTx is true
 // all transactions in the block are returned in full detail, otherwise only the transaction hash is returned.
-func (s *PublicBlockChainAPI) GetUncleByBlockHashAndIndex(blockHash common.Hash, index rpc.HexNumber) (map[string]interface{}, error) {
-	if block := s.bc.GetBlock(blockHash); block != nil {
+func (s *PublicBlockChainAPI) GetUncleByBlockHashAndIndex(ctx context.Context, blockHash common.Hash, index rpc.HexNumber) (map[string]interface{}, error) {
+	block, err := s.b.GetBlock(ctx, blockHash)
+	if block != nil {
 		uncles := block.Uncles()
 		if index.Int() < 0 || index.Int() >= len(uncles) {
 			glog.V(logger.Debug).Infof("uncle block on index %d not found for block %s", index.Int(), blockHash.Hex())
@@ -533,20 +552,20 @@ func (s *PublicBlockChainAPI) GetUncleByBlockHashAndIndex(blockHash common.Hash,
 		block = types.NewBlockWithHeader(uncles[index.Int()])
 		return s.rpcOutputBlock(block, false, false)
 	}
-	return nil, nil
+	return nil, err
 }
 
 // GetUncleCountByBlockNumber returns number of uncles in the block for the given block number
-func (s *PublicBlockChainAPI) GetUncleCountByBlockNumber(blockNr rpc.BlockNumber) *rpc.HexNumber {
-	if block := blockByNumber(s.miner, s.bc, blockNr); block != nil {
+func (s *PublicBlockChainAPI) GetUncleCountByBlockNumber(ctx context.Context, blockNr rpc.BlockNumber) *rpc.HexNumber {
+	if block, _ := s.b.BlockByNumber(ctx, blockNr); block != nil {
 		return rpc.NewHexNumber(len(block.Uncles()))
 	}
 	return nil
 }
 
 // GetUncleCountByBlockHash returns number of uncles in the block for the given block hash
-func (s *PublicBlockChainAPI) GetUncleCountByBlockHash(blockHash common.Hash) *rpc.HexNumber {
-	if block := s.bc.GetBlock(blockHash); block != nil {
+func (s *PublicBlockChainAPI) GetUncleCountByBlockHash(ctx context.Context, blockHash common.Hash) *rpc.HexNumber {
+	if block, _ := s.b.GetBlock(ctx, blockHash); block != nil {
 		return rpc.NewHexNumber(len(block.Uncles()))
 	}
 	return nil
@@ -577,14 +596,14 @@ func (s *PublicBlockChainAPI) NewBlocks(args NewBlocksArgs) (rpc.Subscription, e
 }
 
 // GetCode returns the code stored at the given address in the state for the given block number.
-func (s *PublicBlockChainAPI) GetCode(address common.Address, blockNr rpc.BlockNumber) (string, error) {
-	state, _, err := stateAndBlockByNumber(s.miner, s.bc, blockNr, s.chainDb)
+func (s *PublicBlockChainAPI) GetCode(ctx context.Context, address common.Address, blockNr rpc.BlockNumber) (string, error) {
+	state, err := s.b.StateByNumber(blockNr)
 	if state == nil || err != nil {
 		return "", err
 	}
-	res := state.GetCode(address)
-	if len(res) == 0 { // backwards compatibility
-		return "0x", nil
+	res, err := state.GetCode(ctx, address)
+	if len(res) == 0 || err != nil { // backwards compatibility
+		return "0x", err
 	}
 	return common.ToHex(res), nil
 }
@@ -592,17 +611,22 @@ func (s *PublicBlockChainAPI) GetCode(address common.Address, blockNr rpc.BlockN
 // GetStorageAt returns the storage from the state at the given address, key and
 // block number. The rpc.LatestBlockNumber and rpc.PendingBlockNumber meta block
 // numbers are also allowed.
-func (s *PublicBlockChainAPI) GetStorageAt(address common.Address, key string, blockNr rpc.BlockNumber) (string, error) {
-	state, _, err := stateAndBlockByNumber(s.miner, s.bc, blockNr, s.chainDb)
+func (s *PublicBlockChainAPI) GetStorageAt(ctx context.Context, address common.Address, key string, blockNr rpc.BlockNumber) (string, error) {
+	state, err := s.b.StateByNumber(blockNr)
 	if state == nil || err != nil {
 		return "0x", err
 	}
-	return state.GetState(address, common.HexToHash(key)).Hex(), nil
+	res, err := state.GetState(ctx, address, common.HexToHash(key))
+	if err != nil {
+		return "0x", err
+	}
+	return res.Hex(), nil
 }
 
 // callmsg is the message type used for call transations.
 type callmsg struct {
-	from          *state.StateObject
+	addr          common.Address
+	nonce         uint64
 	to            *common.Address
 	gas, gasPrice *big.Int
 	value         *big.Int
@@ -610,14 +634,14 @@ type callmsg struct {
 }
 
 // accessor boilerplate to implement core.Message
-func (m callmsg) From() (common.Address, error)         { return m.from.Address(), nil }
-func (m callmsg) FromFrontier() (common.Address, error) { return m.from.Address(), nil }
-func (m callmsg) Nonce() uint64                         { return m.from.Nonce() }
-func (m callmsg) To() *common.Address                   { return m.to }
-func (m callmsg) GasPrice() *big.Int                    { return m.gasPrice }
-func (m callmsg) Gas() *big.Int                         { return m.gas }
-func (m callmsg) Value() *big.Int                       { return m.value }
-func (m callmsg) Data() []byte                          { return m.data }
+func (m callmsg) From() (common.Address, error) { return m.addr, nil }
+func (m callmsg) FromFrontier() (common.Address, error) { return m.addr, nil }
+func (m callmsg) Nonce() uint64                 { return m.nonce }
+func (m callmsg) To() *common.Address           { return m.to }
+func (m callmsg) GasPrice() *big.Int            { return m.gasPrice }
+func (m callmsg) Gas() *big.Int                 { return m.gas }
+func (m callmsg) Value() *big.Int               { return m.value }
+func (m callmsg) Data() []byte                  { return m.data }
 
 type CallArgs struct {
 	From     common.Address `json:"from"`
@@ -628,64 +652,66 @@ type CallArgs struct {
 	Data     string         `json:"data"`
 }
 
-func (s *PublicBlockChainAPI) doCall(args CallArgs, blockNr rpc.BlockNumber) (string, *big.Int, error) {
-	// Fetch the state associated with the block number
-	stateDb, block, err := stateAndBlockByNumber(s.miner, s.bc, blockNr, s.chainDb)
-	if stateDb == nil || err != nil {
-		return "0x", nil, err
-	}
-	stateDb = stateDb.Copy()
-
-	// Retrieve the account state object to interact with
-	var from *state.StateObject
-	if args.From == (common.Address{}) {
-		accounts, err := s.am.Accounts()
-		if err != nil || len(accounts) == 0 {
-			from = stateDb.GetOrNewStateObject(common.Address{})
+func (s *PublicBlockChainAPI) doCall(ctx context.Context, args CallArgs, blockNr rpc.BlockNumber) (string, *big.Int, error) {
+	if header := s.b.HeaderByNumber(blockNr); header != nil {
+		var addr common.Address
+		if args.From == (common.Address{}) {
+			accounts, err := s.am.Accounts()
+			if err != nil || len(accounts) == 0 {
+				addr = common.Address{}
+			} else {
+				addr = accounts[0].Address
+			}
 		} else {
-			from = stateDb.GetOrNewStateObject(accounts[0].Address)
+			addr = args.From
 		}
-	} else {
-		from = stateDb.GetOrNewStateObject(args.From)
-	}
-	from.SetBalance(common.MaxBig)
 
-	// Assemble the CALL invocation
-	msg := callmsg{
-		from:     from,
-		to:       &args.To,
-		gas:      args.Gas.BigInt(),
-		gasPrice: args.GasPrice.BigInt(),
-		value:    args.Value.BigInt(),
-		data:     common.FromHex(args.Data),
-	}
-	if msg.gas.Cmp(common.Big0) == 0 {
-		msg.gas = big.NewInt(50000000)
-	}
-	if msg.gasPrice.Cmp(common.Big0) == 0 {
-		msg.gasPrice = new(big.Int).Mul(big.NewInt(50), common.Shannon)
-	}
-	// Execute the call and return
-	vmenv := core.NewEnv(stateDb, s.bc, msg, block.Header())
-	gp := new(core.GasPool).AddGas(common.MaxBig)
+		msg := callmsg{
+			addr:     addr,
+			to:       &args.To,
+			gas:      args.Gas.BigInt(),
+			gasPrice: args.GasPrice.BigInt(),
+			value:    args.Value.BigInt(),
+			data:     common.FromHex(args.Data),
+		}
 
-	res, gas, err := core.ApplyMessage(vmenv, msg, gp)
-	if len(res) == 0 { // backwards compatibility
-		return "0x", gas, err
+		if msg.gas.Cmp(common.Big0) == 0 {
+			msg.gas = big.NewInt(50000000)
+		}
+
+		if msg.gasPrice.Cmp(common.Big0) == 0 {
+			msg.gasPrice = new(big.Int).Mul(big.NewInt(50), common.Shannon)
+		}
+
+		//header := s.bc.CurrentHeader()
+		vmenv, vmError, err := s.b.GetVMEnv(ctx, msg, header)
+		if err != nil {
+			return "0x", common.Big0, err
+		}
+		gp := new(core.GasPool).AddGas(common.MaxBig)
+		res, gas, err := core.ApplyMessage(vmenv, msg, gp)
+		if err := vmError(); err != nil {
+			return "0x", common.Big0, err
+		}
+		if len(res) == 0 { // backwards compatability
+			return "0x", gas, err
+		}
+		return common.ToHex(res), gas, err
 	}
-	return common.ToHex(res), gas, err
+
+	return "0x", common.Big0, nil
 }
 
 // Call executes the given transaction on the state for the given block number.
 // It doesn't make and changes in the state/blockchain and is usefull to execute and retrieve values.
-func (s *PublicBlockChainAPI) Call(args CallArgs, blockNr rpc.BlockNumber) (string, error) {
-	result, _, err := s.doCall(args, blockNr)
+func (s *PublicBlockChainAPI) Call(ctx context.Context, args CallArgs, blockNr rpc.BlockNumber) (string, error) {
+	result, _, err := s.doCall(ctx, args, blockNr)
 	return result, err
 }
 
 // EstimateGas returns an estimate of the amount of gas needed to execute the given transaction.
-func (s *PublicBlockChainAPI) EstimateGas(args CallArgs) (*rpc.HexNumber, error) {
-	_, gas, err := s.doCall(args, rpc.LatestBlockNumber)
+func (s *PublicBlockChainAPI) EstimateGas(ctx context.Context, args CallArgs) (*rpc.HexNumber, error) {
+	_, gas, err := s.doCall(ctx, args, rpc.LatestBlockNumber)
 	return rpc.NewHexNumber(gas), err
 }
 
@@ -703,7 +729,7 @@ func (s *PublicBlockChainAPI) rpcOutputBlock(b *types.Block, inclTx bool, fullTx
 		"stateRoot":        b.Root(),
 		"miner":            b.Coinbase(),
 		"difficulty":       rpc.NewHexNumber(b.Difficulty()),
-		"totalDifficulty":  rpc.NewHexNumber(s.bc.GetTd(b.Hash())),
+		"totalDifficulty":  rpc.NewHexNumber(s.b.GetTd(b.Hash())),
 		"extraData":        fmt.Sprintf("0x%x", b.Extra()),
 		"size":             rpc.NewHexNumber(b.Size().Int64()),
 		"gasLimit":         rpc.NewHexNumber(b.GasLimit()),
@@ -816,30 +842,24 @@ func newRPCTransaction(b *types.Block, txHash common.Hash) (*RPCTransaction, err
 
 // PublicTransactionPoolAPI exposes methods for the RPC interface
 type PublicTransactionPoolAPI struct {
-	eventMux *event.TypeMux
+	b        ApiBackend
 	chainDb  ethdb.Database
-	gpo      *GasPriceOracle
-	bc       *core.BlockChain
-	miner    *miner.Miner
+	eventMux *event.TypeMux
 	am       *accounts.Manager
-	txPool   *core.TxPool
 	txMu     sync.Mutex
 }
 
 // NewPublicTransactionPoolAPI creates a new RPC service with methods specific for the transaction pool.
-func NewPublicTransactionPoolAPI(e *Ethereum) *PublicTransactionPoolAPI {
+func NewPublicTransactionPoolAPI(b ApiBackend, chainDb ethdb.Database, eventMux *event.TypeMux, am *accounts.Manager) *PublicTransactionPoolAPI {
 	return &PublicTransactionPoolAPI{
-		eventMux: e.EventMux(),
-		gpo:      NewGasPriceOracle(e),
-		chainDb:  e.ChainDb(),
-		bc:       e.BlockChain(),
-		am:       e.AccountManager(),
-		txPool:   e.TxPool(),
-		miner:    e.Miner(),
+		b:        b,
+		chainDb:  chainDb,
+		eventMux: eventMux,
+		am:       am,
 	}
 }
 
-func getTransaction(chainDb ethdb.Database, txPool *core.TxPool, txHash common.Hash) (*types.Transaction, bool, error) {
+func getTransaction(chainDb ethdb.Database, b ApiBackend, txHash common.Hash) (*types.Transaction, bool, error) {
 	txData, err := chainDb.Get(txHash.Bytes())
 	isPending := false
 	tx := new(types.Transaction)
@@ -850,7 +870,7 @@ func getTransaction(chainDb ethdb.Database, txPool *core.TxPool, txHash common.H
 		}
 	} else {
 		// pending transaction?
-		tx = txPool.GetTransaction(txHash)
+		tx = b.GetPoolTransaction(txHash)
 		isPending = true
 	}
 
@@ -858,44 +878,52 @@ func getTransaction(chainDb ethdb.Database, txPool *core.TxPool, txHash common.H
 }
 
 // GetBlockTransactionCountByNumber returns the number of transactions in the block with the given block number.
-func (s *PublicTransactionPoolAPI) GetBlockTransactionCountByNumber(blockNr rpc.BlockNumber) *rpc.HexNumber {
-	if block := blockByNumber(s.miner, s.bc, blockNr); block != nil {
+func (s *PublicTransactionPoolAPI) GetBlockTransactionCountByNumber(ctx context.Context, blockNr rpc.BlockNumber) *rpc.HexNumber {
+	if blockNr == rpc.PendingBlockNumber {
+		return rpc.NewHexNumber(0)
+	}
+
+	if block, _ := s.b.BlockByNumber(ctx, blockNr); block != nil {
 		return rpc.NewHexNumber(len(block.Transactions()))
 	}
 	return nil
 }
 
 // GetBlockTransactionCountByHash returns the number of transactions in the block with the given hash.
-func (s *PublicTransactionPoolAPI) GetBlockTransactionCountByHash(blockHash common.Hash) *rpc.HexNumber {
-	if block := s.bc.GetBlock(blockHash); block != nil {
+func (s *PublicTransactionPoolAPI) GetBlockTransactionCountByHash(ctx context.Context, blockHash common.Hash) *rpc.HexNumber {
+	if block, _ := s.b.GetBlock(ctx, blockHash); block != nil {
 		return rpc.NewHexNumber(len(block.Transactions()))
 	}
 	return nil
 }
 
 // GetTransactionByBlockNumberAndIndex returns the transaction for the given block number and index.
-func (s *PublicTransactionPoolAPI) GetTransactionByBlockNumberAndIndex(blockNr rpc.BlockNumber, index rpc.HexNumber) (*RPCTransaction, error) {
-	if block := blockByNumber(s.miner, s.bc, blockNr); block != nil {
+func (s *PublicTransactionPoolAPI) GetTransactionByBlockNumberAndIndex(ctx context.Context, blockNr rpc.BlockNumber, index rpc.HexNumber) (*RPCTransaction, error) {
+	if block, _ := s.b.BlockByNumber(ctx, blockNr); block != nil {
 		return newRPCTransactionFromBlockIndex(block, index.Int())
 	}
 	return nil, nil
 }
 
 // GetTransactionByBlockHashAndIndex returns the transaction for the given block hash and index.
-func (s *PublicTransactionPoolAPI) GetTransactionByBlockHashAndIndex(blockHash common.Hash, index rpc.HexNumber) (*RPCTransaction, error) {
-	if block := s.bc.GetBlock(blockHash); block != nil {
+func (s *PublicTransactionPoolAPI) GetTransactionByBlockHashAndIndex(ctx context.Context, blockHash common.Hash, index rpc.HexNumber) (*RPCTransaction, error) {
+	if block, _ := s.b.GetBlock(ctx, blockHash); block != nil {
 		return newRPCTransactionFromBlockIndex(block, index.Int())
 	}
 	return nil, nil
 }
 
 // GetTransactionCount returns the number of transactions the given address has sent for the given block number
-func (s *PublicTransactionPoolAPI) GetTransactionCount(address common.Address, blockNr rpc.BlockNumber) (*rpc.HexNumber, error) {
-	state, _, err := stateAndBlockByNumber(s.miner, s.bc, blockNr, s.chainDb)
+func (s *PublicTransactionPoolAPI) GetTransactionCount(ctx context.Context, address common.Address, blockNr rpc.BlockNumber) (*rpc.HexNumber, error) {
+	state, err := s.b.StateByNumber(blockNr)
 	if state == nil || err != nil {
 		return nil, err
 	}
-	return rpc.NewHexNumber(state.GetNonce(address)), nil
+	nonce, err := state.GetNonce(ctx, address)
+	if err != nil {
+		return nil, err
+	}
+	return rpc.NewHexNumber(nonce), nil
 }
 
 // getTransactionBlockData fetches the meta data for the given transaction from the chain database. This is useful to
@@ -921,12 +949,12 @@ func getTransactionBlockData(chainDb ethdb.Database, txHash common.Hash) (common
 }
 
 // GetTransactionByHash returns the transaction for the given hash
-func (s *PublicTransactionPoolAPI) GetTransactionByHash(txHash common.Hash) (*RPCTransaction, error) {
+func (s *PublicTransactionPoolAPI) GetTransactionByHash(ctx context.Context, txHash common.Hash) (*RPCTransaction, error) {
 	var tx *types.Transaction
 	var isPending bool
 	var err error
 
-	if tx, isPending, err = getTransaction(s.chainDb, s.txPool, txHash); err != nil {
+	if tx, isPending, err = getTransaction(s.chainDb, s.b, txHash); err != nil {
 		glog.V(logger.Debug).Infof("%v\n", err)
 		return nil, nil
 	} else if tx == nil {
@@ -943,7 +971,7 @@ func (s *PublicTransactionPoolAPI) GetTransactionByHash(txHash common.Hash) (*RP
 		return nil, nil
 	}
 
-	if block := s.bc.GetBlock(blockHash); block != nil {
+	if block, _ := s.b.GetBlock(ctx, blockHash); block != nil {
 		return newRPCTransaction(block, txHash)
 	}
 
@@ -958,7 +986,7 @@ func (s *PublicTransactionPoolAPI) GetTransactionReceipt(txHash common.Hash) (ma
 		return nil, nil
 	}
 
-	tx, _, err := getTransaction(s.chainDb, s.txPool, txHash)
+	tx, _, err := getTransaction(s.chainDb, s.b, txHash)
 	if err != nil {
 		glog.V(logger.Debug).Infof("%v\n", err)
 		return nil, nil
@@ -1023,12 +1051,12 @@ type SendTxArgs struct {
 
 // SendTransaction will create a transaction for the given transaction argument, sign it and submit it to the
 // transaction pool.
-func (s *PublicTransactionPoolAPI) SendTransaction(args SendTxArgs) (common.Hash, error) {
+func (s *PublicTransactionPoolAPI) SendTransaction(ctx context.Context, args SendTxArgs) (common.Hash, error) {
 	if args.Gas == nil {
 		args.Gas = rpc.NewHexNumber(defaultGas)
 	}
 	if args.GasPrice == nil {
-		args.GasPrice = rpc.NewHexNumber(s.gpo.SuggestPrice())
+		args.GasPrice = rpc.NewHexNumber(s.b.SuggestPrice())
 	}
 	if args.Value == nil {
 		args.Value = rpc.NewHexNumber(0)
@@ -1038,7 +1066,11 @@ func (s *PublicTransactionPoolAPI) SendTransaction(args SendTxArgs) (common.Hash
 	defer s.txMu.Unlock()
 
 	if args.Nonce == nil {
-		args.Nonce = rpc.NewHexNumber(s.txPool.State().GetNonce(args.From))
+		nonce, err := s.b.GetPoolNonce(ctx, args.From)
+		if err != nil {
+			return common.Hash{}, err
+		}
+		args.Nonce = rpc.NewHexNumber(nonce)
 	}
 
 	var tx *types.Transaction
@@ -1055,9 +1087,8 @@ func (s *PublicTransactionPoolAPI) SendTransaction(args SendTxArgs) (common.Hash
 		return common.Hash{}, err
 	}
 
-	s.txPool.SetLocal(signedTx)
-	if err := s.txPool.Add(signedTx); err != nil {
-		return common.Hash{}, err
+	if err := s.b.SendTx(ctx, signedTx); err != nil {
+		return common.Hash{}, nil
 	}
 
 	if contractCreation {
@@ -1072,14 +1103,13 @@ func (s *PublicTransactionPoolAPI) SendTransaction(args SendTxArgs) (common.Hash
 
 // SendRawTransaction will add the signed transaction to the transaction pool.
 // The sender is responsible for signing the transaction and using the correct nonce.
-func (s *PublicTransactionPoolAPI) SendRawTransaction(encodedTx string) (string, error) {
+func (s *PublicTransactionPoolAPI) SendRawTransaction(ctx context.Context, encodedTx string) (string, error) {
 	tx := new(types.Transaction)
 	if err := rlp.DecodeBytes(common.FromHex(encodedTx), tx); err != nil {
 		return "", err
 	}
 
-	s.txPool.SetLocal(tx)
-	if err := s.txPool.Add(tx); err != nil {
+	if err := s.b.SendTx(ctx, tx); err != nil {
 		return "", err
 	}
 
@@ -1207,12 +1237,12 @@ func newTx(t *types.Transaction) *Tx {
 // SignTransaction will sign the given transaction with the from account.
 // The node needs to have the private key of the account corresponding with
 // the given from address and it needs to be unlocked.
-func (s *PublicTransactionPoolAPI) SignTransaction(args *SignTransactionArgs) (*SignTransactionResult, error) {
+func (s *PublicTransactionPoolAPI) SignTransaction(ctx context.Context, args *SignTransactionArgs) (*SignTransactionResult, error) {
 	if args.Gas == nil {
 		args.Gas = rpc.NewHexNumber(defaultGas)
 	}
 	if args.GasPrice == nil {
-		args.GasPrice = rpc.NewHexNumber(s.gpo.SuggestPrice())
+		args.GasPrice = rpc.NewHexNumber(s.b.SuggestPrice())
 	}
 	if args.Value == nil {
 		args.Value = rpc.NewHexNumber(0)
@@ -1222,7 +1252,11 @@ func (s *PublicTransactionPoolAPI) SignTransaction(args *SignTransactionArgs) (*
 	defer s.txMu.Unlock()
 
 	if args.Nonce == nil {
-		args.Nonce = rpc.NewHexNumber(s.txPool.State().GetNonce(args.From))
+		nonce, err := s.b.GetPoolNonce(ctx, args.From)
+		if err != nil {
+			return nil, err
+		}
+		args.Nonce = rpc.NewHexNumber(nonce)
 	}
 
 	var tx *types.Transaction
@@ -1260,7 +1294,7 @@ func (s *PublicTransactionPoolAPI) PendingTransactions() ([]*RPCTransaction, err
 		accountSet.Add(account.Address)
 	}
 
-	pending := s.txPool.GetTransactions()
+	pending := s.b.GetPoolTransactions()
 	transactions := make([]*RPCTransaction, 0)
 	for _, tx := range pending {
 		if from, _ := tx.FromFrontier(); accountSet.Has(from) {
@@ -1311,9 +1345,9 @@ func (s *PublicTransactionPoolAPI) NewPendingTransactions() (rpc.Subscription, e
 
 // Resend accepts an existing transaction and a new gas price and limit. It will remove the given transaction from the
 // pool and reinsert it with the new gas price and limit.
-func (s *PublicTransactionPoolAPI) Resend(tx *Tx, gasPrice, gasLimit *rpc.HexNumber) (common.Hash, error) {
+func (s *PublicTransactionPoolAPI) Resend(ctx context.Context, tx *Tx, gasPrice, gasLimit *rpc.HexNumber) (common.Hash, error) {
 
-	pending := s.txPool.GetTransactions()
+	pending := s.b.GetPoolTransactions()
 	for _, p := range pending {
 		if pFrom, err := p.FromFrontier(); err == nil && pFrom == tx.From && p.SigHash() == tx.tx.SigHash() {
 			if gasPrice == nil {
@@ -1336,8 +1370,8 @@ func (s *PublicTransactionPoolAPI) Resend(tx *Tx, gasPrice, gasLimit *rpc.HexNum
 				return common.Hash{}, err
 			}
 
-			s.txPool.RemoveTx(tx.Hash)
-			if err = s.txPool.Add(signedTx); err != nil {
+			s.b.RemoveTx(tx.Hash)
+			if err = s.b.SendTx(ctx, signedTx); err != nil {
 				return common.Hash{}, err
 			}
 
@@ -1351,18 +1385,30 @@ func (s *PublicTransactionPoolAPI) Resend(tx *Tx, gasPrice, gasLimit *rpc.HexNum
 // PrivateAdminAPI is the collection of Etheruem APIs exposed over the private
 // admin endpoint.
 type PrivateAdminAPI struct {
-	eth *Ethereum
+	b ApiBackend
+}
+
+// PrivateFullAdminAPI is the collection of Etheruem full node-related APIs
+// exposed over the private admin endpoint.
+type PrivateFullAdminAPI struct {
+	eth *FullEthereum
 }
 
 // NewPrivateAdminAPI creates a new API definition for the private admin methods
 // of the Ethereum service.
-func NewPrivateAdminAPI(eth *Ethereum) *PrivateAdminAPI {
-	return &PrivateAdminAPI{eth: eth}
+func NewPrivateAdminAPI(b ApiBackend) *PrivateAdminAPI {
+	return &PrivateAdminAPI{b: b}
+}
+
+// NewPrivateAdminAPI creates a new API definition for the full node private
+// admin methods of the Ethereum service.
+func NewPrivateFullAdminAPI(eth *FullEthereum) *PrivateFullAdminAPI {
+	return &PrivateFullAdminAPI{eth: eth}
 }
 
 // SetSolc sets the Solidity compiler path to be used by the node.
 func (api *PrivateAdminAPI) SetSolc(path string) (string, error) {
-	solc, err := api.eth.SetSolc(path)
+	solc, err := api.b.SetSolc(path)
 	if err != nil {
 		return "", err
 	}
@@ -1370,7 +1416,7 @@ func (api *PrivateAdminAPI) SetSolc(path string) (string, error) {
 }
 
 // ExportChain exports the current blockchain into a local file.
-func (api *PrivateAdminAPI) ExportChain(file string) (bool, error) {
+func (api *PrivateFullAdminAPI) ExportChain(file string) (bool, error) {
 	// Make sure we can create the file to export into
 	out, err := os.OpenFile(file, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, os.ModePerm)
 	if err != nil {
@@ -1396,7 +1442,7 @@ func hasAllBlocks(chain *core.BlockChain, bs []*types.Block) bool {
 }
 
 // ImportChain imports a blockchain from a local file.
-func (api *PrivateAdminAPI) ImportChain(file string) (bool, error) {
+func (api *PrivateFullAdminAPI) ImportChain(file string) (bool, error) {
 	// Make sure the can access the file to import
 	in, err := os.Open(file)
 	if err != nil {
@@ -1440,17 +1486,29 @@ func (api *PrivateAdminAPI) ImportChain(file string) (bool, error) {
 // PublicDebugAPI is the collection of Etheruem APIs exposed over the public
 // debugging endpoint.
 type PublicDebugAPI struct {
-	eth *Ethereum
+	b ApiBackend
+}
+
+// PublicFullDebugAPI is the collection of Etheruem full node APIs exposed
+// over the public debugging endpoint.
+type PublicFullDebugAPI struct {
+	eth *FullEthereum
 }
 
 // NewPublicDebugAPI creates a new API definition for the public debug methods
 // of the Ethereum service.
-func NewPublicDebugAPI(eth *Ethereum) *PublicDebugAPI {
-	return &PublicDebugAPI{eth: eth}
+func NewPublicDebugAPI(b ApiBackend) *PublicDebugAPI {
+	return &PublicDebugAPI{b: b}
+}
+
+// NewPublicFullDebugAPI creates a new API definition for the full node-
+// related public debug methods of the Ethereum service.
+func NewPublicFullDebugAPI(eth *FullEthereum) *PublicFullDebugAPI {
+	return &PublicFullDebugAPI{eth: eth}
 }
 
 // DumpBlock retrieves the entire state of the database at a given block.
-func (api *PublicDebugAPI) DumpBlock(number uint64) (state.World, error) {
+func (api *PublicFullDebugAPI) DumpBlock(number uint64) (state.World, error) {
 	block := api.eth.BlockChain().GetBlockByNumber(number)
 	if block == nil {
 		return state.World{}, fmt.Errorf("block #%d not found", number)
@@ -1463,8 +1521,8 @@ func (api *PublicDebugAPI) DumpBlock(number uint64) (state.World, error) {
 }
 
 // GetBlockRlp retrieves the RLP encoded for of a single block.
-func (api *PublicDebugAPI) GetBlockRlp(number uint64) (string, error) {
-	block := api.eth.BlockChain().GetBlockByNumber(number)
+func (api *PublicDebugAPI) GetBlockRlp(ctx context.Context, number uint64) (string, error) {
+	block, _ := api.b.BlockByNumber(ctx, rpc.BlockNumber(number))
 	if block == nil {
 		return "", fmt.Errorf("block #%d not found", number)
 	}
@@ -1476,8 +1534,8 @@ func (api *PublicDebugAPI) GetBlockRlp(number uint64) (string, error) {
 }
 
 // PrintBlock retrieves a block and returns its pretty printed form.
-func (api *PublicDebugAPI) PrintBlock(number uint64) (string, error) {
-	block := api.eth.BlockChain().GetBlockByNumber(number)
+func (api *PublicDebugAPI) PrintBlock(ctx context.Context, number uint64) (string, error) {
+	block, _ := api.b.BlockByNumber(ctx, rpc.BlockNumber(number))
 	if block == nil {
 		return "", fmt.Errorf("block #%d not found", number)
 	}
@@ -1485,8 +1543,8 @@ func (api *PublicDebugAPI) PrintBlock(number uint64) (string, error) {
 }
 
 // SeedHash retrieves the seed hash of a block.
-func (api *PublicDebugAPI) SeedHash(number uint64) (string, error) {
-	block := api.eth.BlockChain().GetBlockByNumber(number)
+func (api *PublicDebugAPI) SeedHash(ctx context.Context, number uint64) (string, error) {
+	block, _ := api.b.BlockByNumber(ctx, rpc.BlockNumber(number))
 	if block == nil {
 		return "", fmt.Errorf("block #%d not found", number)
 	}
@@ -1500,17 +1558,29 @@ func (api *PublicDebugAPI) SeedHash(number uint64) (string, error) {
 // PrivateDebugAPI is the collection of Etheruem APIs exposed over the private
 // debugging endpoint.
 type PrivateDebugAPI struct {
-	eth *Ethereum
+	b ApiBackend
+}
+
+// PrivateDebugAPI is the collection of Etheruem full node APIs exposed over
+// the private debugging endpoint.
+type PrivateFullDebugAPI struct {
+	eth *FullEthereum
 }
 
 // NewPrivateDebugAPI creates a new API definition for the private debug methods
 // of the Ethereum service.
-func NewPrivateDebugAPI(eth *Ethereum) *PrivateDebugAPI {
-	return &PrivateDebugAPI{eth: eth}
+func NewPrivateDebugAPI(b ApiBackend) *PrivateDebugAPI {
+	return &PrivateDebugAPI{b: b}
+}
+
+// NewPrivateDebugAPI creates a new API definition for the full node-related
+// private debug methods of the Ethereum service.
+func NewPrivateFullDebugAPI(eth *FullEthereum) *PrivateFullDebugAPI {
+	return &PrivateFullDebugAPI{eth: eth}
 }
 
 // ProcessBlock reprocesses an already owned block.
-func (api *PrivateDebugAPI) ProcessBlock(number uint64) (bool, error) {
+func (api *PrivateFullDebugAPI) ProcessBlock(number uint64) (bool, error) {
 	// Fetch the block that we aim to reprocess
 	block := api.eth.BlockChain().GetBlockByNumber(number)
 	if block == nil {
@@ -1545,7 +1615,7 @@ func (api *PrivateDebugAPI) ProcessBlock(number uint64) (bool, error) {
 
 // SetHead rewinds the head of the blockchain to a previous block.
 func (api *PrivateDebugAPI) SetHead(number uint64) {
-	api.eth.BlockChain().SetHead(number)
+	api.b.SetHead(number)
 }
 
 // StructLogRes stores a structured log emitted by the evm while replaying a
@@ -1570,7 +1640,7 @@ type TransactionExecutionResult struct {
 	StructLogs  []structLogRes `json:"structLogs"`
 }
 
-func (s *PrivateDebugAPI) doReplayTransaction(txHash common.Hash) ([]vm.StructLog, []byte, *big.Int, error) {
+func (s *PrivateFullDebugAPI) doReplayTransaction(txHash common.Hash) ([]vm.StructLog, []byte, *big.Int, error) {
 	// Retrieve the tx from the chain
 	tx, _, blockIndex, _ := core.GetTransaction(s.eth.ChainDb(), txHash)
 
@@ -1594,9 +1664,8 @@ func (s *PrivateDebugAPI) doReplayTransaction(txHash common.Hash) ([]vm.StructLo
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("Unable to create transaction sender")
 	}
-	from := stateDb.GetOrNewStateObject(txFrom)
 	msg := callmsg{
-		from:     from,
+		addr:     txFrom,
 		to:       tx.To(),
 		gas:      tx.Gas(),
 		gasPrice: tx.GasPrice(),
@@ -1619,7 +1688,7 @@ func (s *PrivateDebugAPI) doReplayTransaction(txHash common.Hash) ([]vm.StructLo
 
 // Executes a transaction and returns the structured logs of the evm
 // gathered during the execution
-func (s *PrivateDebugAPI) ReplayTransaction(txHash common.Hash, stackDepth int, memorySize int, storageSize int) (*TransactionExecutionResult, error) {
+func (s *PrivateFullDebugAPI) ReplayTransaction(txHash common.Hash, stackDepth int, memorySize int, storageSize int) (*TransactionExecutionResult, error) {
 
 	structLogs, ret, gas, err := s.doReplayTransaction(txHash)
 

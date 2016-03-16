@@ -20,13 +20,19 @@ package light
 
 import (
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/core"
+	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/ethdb"
 	"github.com/ethereum/go-ethereum/rlp"
 	"golang.org/x/net/context"
 )
 
-// OdrBackend is an interface to a backend service that handles odr retrievals
+// NoOdr is the default context passed to an ODR capable function when the ODR
+// service is not required.
+var NoOdr = context.Background()
+
+// OdrBackend is an interface to a backend service that handles ODR retrievals
 type OdrBackend interface {
 	Database() ethdb.Database
 	Retrieve(ctx context.Context, req OdrRequest) error
