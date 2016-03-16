@@ -311,11 +311,6 @@ func (s *Ethereum) APIs() []rpc.API {
 		{
 			Namespace: "eth",
 			Version:   "1.0",
-			Service:   NewPublicEthereumAPI(s),
-			Public:    true,
-		}, {
-			Namespace: "eth",
-			Version:   "1.0",
 			Service:   NewPublicAccountAPI(s.AccountManager()),
 			Public:    true,
 		}, {
@@ -346,12 +341,12 @@ func (s *FullEthereum) APIs() []rpc.API {
 		}, {
 			Namespace: "eth",
 			Version:   "1.0",
-			Service:   NewPublicBlockChainAPI(s.BlockChain(), s.Miner(), s.ChainDb(), s.EventMux(), s.AccountManager()),
+			Service:   NewPublicBlockChainAPI(apiBackend, s.BlockChain(), s.Miner(), s.ChainDb(), s.EventMux(), s.AccountManager()),
 			Public:    true,
 		}, {
 			Namespace: "eth",
 			Version:   "1.0",
-			Service:   NewPublicTransactionPoolAPI(s),
+			Service:   NewPublicTransactionPoolAPI(apiBackend, s.ChainDb(), s.EventMux(), s.AccountManager()),
 			Public:    true,
 		}, {
 			Namespace: "eth",
@@ -371,7 +366,7 @@ func (s *FullEthereum) APIs() []rpc.API {
 		}, {
 			Namespace: "txpool",
 			Version:   "1.0",
-			Service:   NewPublicTxPoolAPI(s),
+			Service:   NewPublicTxPoolAPI(apiBackend),
 			Public:    true,
 		}, {
 			Namespace: "eth",
@@ -381,7 +376,7 @@ func (s *FullEthereum) APIs() []rpc.API {
 		}, {
 			Namespace: "admin",
 			Version:   "1.0",
-			Service:   NewPrivateAdminAPI(s),
+			Service:   NewPrivateAdminAPI(apiBackend),
 		}, {
 			Namespace: "admin",
 			Version:   "1.0",
@@ -389,7 +384,7 @@ func (s *FullEthereum) APIs() []rpc.API {
 		}, {
 			Namespace: "debug",
 			Version:   "1.0",
-			Service:   NewPublicDebugAPI(s),
+			Service:   NewPublicDebugAPI(apiBackend),
 			Public:    true,
 		}, {
 			Namespace: "debug",
@@ -399,7 +394,7 @@ func (s *FullEthereum) APIs() []rpc.API {
 		}, {
 			Namespace: "debug",
 			Version:   "1.0",
-			Service:   NewPrivateDebugAPI(s),
+			Service:   NewPrivateDebugAPI(apiBackend),
 		}, {
 			Namespace: "debug",
 			Version:   "1.0",

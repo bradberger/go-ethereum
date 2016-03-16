@@ -195,7 +195,7 @@ func (self *LightChain) Validator() core.HeaderValidator {
 
 // State returns a new mutable state based on the current HEAD block.
 func (self *LightChain) State() *LightState {
-	return NewLightState(StateTrieID(self.hc.CurrentHeader()), self.odr)
+	return NewLightState(self.hc.CurrentHeader().Root, self.odr)
 }
 
 // Reset purges the entire blockchain, restoring it to its genesis state.

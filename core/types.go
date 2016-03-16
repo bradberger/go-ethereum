@@ -46,6 +46,14 @@ type Validator interface {
 	ValidateState(block, parent *types.Block, state *state.StateDB, receipts types.Receipts, usedGas *big.Int) error
 }
 
+// HeaderValidator is an interface for validating headers only
+//
+// ValidateHeader validates the given header and parent and returns an error
+// if it failed to do so.
+type HeaderValidator interface {
+	ValidateHeader(header, parent *types.Header, checkPow bool) error
+}
+
 // Processor is an interface for processing blocks using a given initial state.
 //
 // Process takes the block to be processed and the statedb upon which the

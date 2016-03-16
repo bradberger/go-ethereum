@@ -98,7 +98,8 @@ func NewTxPool(eventMux *event.TypeMux, chain *LightChain, relay TxRelayBackend)
 
 // currentState returns the light state of the current head header
 func (pool *TxPool) currentState() *LightState {
-	return NewLightState(StateTrieID(pool.chain.CurrentHeader()), pool.odr)
+	// @TODO Determine if it's the Root or BlockHash being used from the *TrieID
+	return NewLightState(StateTrieID(pool.chain.CurrentHeader()).Root, pool.odr)
 }
 
 // GetNonce returns the "pending" nonce of a given address. It always queries

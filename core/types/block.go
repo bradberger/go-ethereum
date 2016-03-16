@@ -70,6 +70,10 @@ type Header struct {
 	Nonce       BlockNonce
 }
 
+func (h *Header) GetNumberU64() uint64    {
+	return h.Number.Uint64()
+}
+
 func (h *Header) Hash() common.Hash {
 	return rlpHash(h)
 }

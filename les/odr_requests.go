@@ -46,7 +46,7 @@ func LesRequest(req light.OdrRequest) LesOdrRequest {
 		return (*ReceiptsRequest)(r)
 	case *light.TrieRequest:
 		return (*TrieRequest)(r)
-	case *light.CodeRequest:
+	case *light.NodeDataRequest:
 		return (*CodeRequest)(r)
 	default:
 		return nil
@@ -144,17 +144,17 @@ func (self *ReceiptsRequest) Valid(db ethdb.Database, msg *Msg) bool {
 type TrieRequest light.TrieRequest
 
 func (self *TrieRequest) Request(reqID uint64, peer *odrPeer) error {
-	glog.V(logger.Debug).Infof("ODR: requesting trie root %08x key %08x from peer %v", self.Id.Root[:4], self.Key[:4], peer.Id())
+	glog.V(logger.Debug).Infof("ODR: requesting trie root %08x key %08x from peer %v", self.Root[:4], self.Key[:4], peer.Id())
 	req := &ProofReq{
-		BHash:  self.Id.BlockHash,
-		AccKey: self.Id.AccKey,
+		BHash:  self.Root,
+		// AccKey: self.Id.AccKey, // @TODO Figure out what the AccKey is
 		Key:    self.Key,
 	}
 	return peer.GetProofs(reqID, []*ProofReq{req})
 }
 
 func (self *TrieRequest) Valid(db ethdb.Database, msg *Msg) bool {
-	glog.V(logger.Debug).Infof("ODR: validating trie root %08x key %08x", self.Id.Root[:4], self.Key[:4])
+	glog.V(logger.Debug).Infof("ODR: validating trie root %08x key %08x", self.Root[:4], self.Key[:4])
 
 	if msg.MsgType != MsgProofs {
 		glog.V(logger.Debug).Infof("ODR: invalid message type")
@@ -165,7 +165,7 @@ func (self *TrieRequest) Valid(db ethdb.Database, msg *Msg) bool {
 		glog.V(logger.Debug).Infof("ODR: invalid number of entries: %d", len(proofs))
 		return false
 	}
-	_, err := trie.VerifyProof(self.Id.Root, self.Key, proofs[0])
+	_, err := trie.VerifyProof(self.Root, self.Key, proofs[0])
 	if err != nil {
 		glog.V(logger.Debug).Infof("ODR: merkle proof verification error: %v", err)
 		return false
@@ -176,7 +176,7 @@ func (self *TrieRequest) Valid(db ethdb.Database, msg *Msg) bool {
 }
 
 // ODR request type for node data (used for retrieving contract code), see access.ObjectAccess interface
-type CodeRequest light.CodeRequest
+type CodeRequest light.NodeDataRequest
 
 func (self *CodeRequest) Request(reqID uint64, peer *odrPeer) error {
 	glog.V(logger.Debug).Infof("ODR: requesting node data for hash %08x from peer %v", self.Hash[:4], peer.Id())

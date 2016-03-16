@@ -41,7 +41,7 @@ type LightEthereum struct {
 }
 
 func NewLightEthereum(ctx *node.ServiceContext, config *eth.Config) (*LightEthereum, error) {
-	e, err := eth.NewEthereum(ctx, config)
+	e, err := eth.New(ctx, config)
 	if err != nil {
 		return nil, err
 	}
@@ -74,6 +74,8 @@ func NewLightEthereum(ctx *node.ServiceContext, config *eth.Config) (*LightEther
 
 // APIs returns the collection of RPC services the ethereum package offers.
 // NOTE, some of these services probably need to be moved to somewhere else.
+// @TODO eth.NewPublicBlockChainAPI second argument needs a *core.Blockchain somehow from s.BlockChain()
+// It might be that the API is removed because it just can't be done cleanly. 
 func (s *LightEthereum) APIs() []rpc.API {
 	apiBackend := &LesApiBackend{s}
 	return []rpc.API{
@@ -85,7 +87,7 @@ func (s *LightEthereum) APIs() []rpc.API {
 		}, {
 			Namespace: "eth",
 			Version:   "1.0",
-			Service:   eth.NewPublicBlockChainAPI(apiBackend, s.EventMux(), s.AccountManager()),
+			Service:   eth.NewPublicBlockChainAPI(apiBackend, nil, nil, s.ChainDb(), s.EventMux(), s.AccountManager()),
 			Public:    true,
 		}, {
 			Namespace: "eth",

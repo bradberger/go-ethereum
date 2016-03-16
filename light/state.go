@@ -37,6 +37,7 @@ type LightState struct {
 	trie *LightTrie
 
 	stateObjects map[string]*StateObject
+	refund       *big.Int
 }
 
 // NewLightState creates a new LightState with the specified root.
@@ -50,7 +51,12 @@ func NewLightState(root common.Hash, odr OdrBackend) *LightState {
 		odr:          odr,
 		trie:         tr,
 		stateObjects: make(map[string]*StateObject),
+		refund:       new(big.Int),
 	}
+}
+
+func (self *LightState) AddRefund(gas *big.Int) {
+	self.refund.Add(self.refund, gas)
 }
 
 // HasAccount returns true if an account exists at the given address
@@ -194,7 +200,7 @@ func (self *LightState) GetStateObject(ctx context.Context, addr common.Address)
 		return nil, nil
 	}
 
-	stateObject, err = DecodeObject(ctx, self.id, addr, self.odr, []byte(data))
+	stateObject, err = DecodeObject(ctx, addr, self.odr, []byte(data))
 	if err != nil {
 		return nil, err
 	}
@@ -272,4 +278,10 @@ func (self *LightState) Copy() *LightState {
 func (self *LightState) Set(state *LightState) {
 	self.trie = state.trie
 	self.stateObjects = state.stateObjects
+	self.refund = state.refund
+}
+
+// GetRefund returns the refund value collected during a vm execution
+func (self *LightState) GetRefund() *big.Int {
+	return self.refund
 }

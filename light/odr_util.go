@@ -22,14 +22,11 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core"
 	"github.com/ethereum/go-ethereum/core/types"
-	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/logger"
 	"github.com/ethereum/go-ethereum/logger/glog"
 	"github.com/ethereum/go-ethereum/rlp"
 	"golang.org/x/net/context"
 )
-
-var sha3_nil = crypto.Keccak256Hash(nil)
 
 var ErrNoHeader = errors.New("Block header not found")
 
@@ -44,11 +41,11 @@ func retrieveContractCode(ctx context.Context, odr OdrBackend, id *TrieID, hash 
 	if res != nil {
 		return res, nil
 	}
-	r := &CodeRequest{Id: id, Hash: hash}
+	r := &NodeDataRequest{Hash: hash}
 	if err := odr.Retrieve(ctx, r); err != nil {
 		return nil, err
 	} else {
-		return r.Data, nil
+		return r.GetData(), nil
 	}
 }
 

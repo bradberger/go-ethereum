@@ -60,7 +60,8 @@ func (b *LesApiBackend) StateByNumber(blockNr rpc.BlockNumber) (eth.ApiState, er
 	if header == nil {
 		return nil, nil
 	}
-	return light.NewLightState(light.StateTrieID(header), b.eth.odr), nil
+	// @TODO Figure out if need .Root or .BlockHash
+	return light.NewLightState(light.StateTrieID(header).Root, b.eth.odr), nil
 }
 
 func (b *LesApiBackend) GetBlock(ctx context.Context, blockHash common.Hash) (*types.Block, error) {
@@ -72,7 +73,8 @@ func (b *LesApiBackend) GetTd(blockHash common.Hash) *big.Int {
 }
 
 func (b *LesApiBackend) GetVMEnv(ctx context.Context, msg core.Message, header *types.Header) (vm.Environment, func() error, error) {
-	stateDb := light.NewLightState(light.StateTrieID(header), b.eth.odr)
+	// @TODO Figure out if need .Root or .BlockHash
+	stateDb := light.NewLightState(light.StateTrieID(header).Root, b.eth.odr)
 	stateDb = stateDb.Copy()
 	addr, _ := msg.From()
 	from, err := stateDb.GetOrNewStateObject(ctx, addr)

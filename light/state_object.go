@@ -92,6 +92,34 @@ type StateObject struct {
 	dirty   bool
 }
 
+// ReturnGas copies "core/state".StateObject to implement "core/vm".Account
+func (so *StateObject) ReturnGas(gas, price *big.Int) {}
+
+// Value is never called, but must be present to allow StateObject to be used
+// as a vm.Account interface that also satisfies the vm.ContractRef
+// interface. Interfaces are awesome.
+func (so *StateObject) Value() *big.Int {
+	panic("Value on StateObject should never be called")
+}
+
+// EachStorage is added to impement "core/vm".Account
+func (so *StateObject) EachStorage(cb func(key, value []byte)) {
+	// When iterating over the storage check the cache first
+	for h, v := range so.storage {
+		cb([]byte(h), v.Bytes())
+	}
+
+	// @TODO Determine what this does and if it's needed.
+	// it := so.trie.Iterator()
+	// for it.Next() {
+	// 	// ignore cached values
+	// 	key := so.trie.GetKey(it.Key)
+	// 	if _, ok := so.storage[string(key)]; !ok {
+	// 		cb(key, it.Value)
+	// 	}
+	// }
+}
+
 // NewStateObject creates a new StateObject of the specified account address
 func NewStateObject(address common.Address, odr OdrBackend) *StateObject {
 	object := &StateObject{

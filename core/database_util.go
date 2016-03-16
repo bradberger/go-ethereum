@@ -297,6 +297,16 @@ func WriteBody(db ethdb.Database, hash common.Hash, body *types.Body) error {
 	return nil
 }
 
+// WriteBodyRLP writes a serialized body of a block into the database.
+func WriteBodyRLP(db ethdb.Database, hash common.Hash, rlp rlp.RawValue) error {
+	key := append(append(blockPrefix, hash.Bytes()...), bodySuffix...)
+	if err := db.Put(key, rlp); err != nil {
+		glog.Fatalf("failed to store block body into database: %v", err)
+		return err
+	}
+	return nil
+}
+
 // WriteTd serializes the total difficulty of a block into the database.
 func WriteTd(db ethdb.Database, hash common.Hash, td *big.Int) error {
 	data, err := rlp.EncodeToBytes(td)

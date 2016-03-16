@@ -698,10 +698,10 @@ func (self *BlockChain) procFutureBlocks() {
 	}
 }
 
-type writeStatus byte
+type WriteStatus byte
 
 const (
-	NonStatTy writeStatus = iota
+	NonStatTy WriteStatus = iota
 	CanonStatTy
 	SplitStatTy
 	SideStatTy
@@ -1055,7 +1055,7 @@ func (self *BlockChain) InsertReceiptChain(blockChain types.Blocks, receiptChain
 }
 
 // WriteBlock writes the block to the chain.
-func (self *BlockChain) WriteBlock(block *types.Block) (status writeStatus, err error) {
+func (self *BlockChain) WriteBlock(block *types.Block) (status WriteStatus, err error) {
 	self.wg.Add(1)
 	defer self.wg.Done()
 

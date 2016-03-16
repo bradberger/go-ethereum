@@ -153,7 +153,7 @@ func NewProtocolManager(lightSync bool, networkId int, mux *event.TypeMux, pow p
 
 	if lightSync {
 		glog.V(logger.Debug).Infof("LES: create downloader")
-		manager.downloader = downloader.New(downloader.LightSync, chainDb, manager.eventMux, blockchain.HasHeader, nil, blockchain.GetHeader,
+		manager.downloader = downloader.New(chainDb, manager.eventMux, blockchain.HasHeader, nil, blockchain.GetHeader,
 			nil, blockchain.CurrentHeader, nil, nil, nil, blockchain.GetTd,
 			blockchain.InsertHeaderChain, nil, nil, blockchain.Rollback, manager.removePeer)
 	}
