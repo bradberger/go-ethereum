@@ -147,7 +147,7 @@ func (self *TrieRequest) Request(reqID uint64, peer *odrPeer) error {
 	glog.V(logger.Debug).Infof("ODR: requesting trie root %08x key %08x from peer %v", self.Root[:4], self.Key[:4], peer.Id())
 	req := &ProofReq{
 		BHash:  self.Root,
-		// AccKey: self.Id.AccKey, // @TODO Figure out what the AccKey is
+		AccKey: self.Id.AccKey,
 		Key:    self.Key,
 	}
 	return peer.GetProofs(reqID, []*ProofReq{req})
