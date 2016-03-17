@@ -46,7 +46,7 @@ func LesRequest(req light.OdrRequest) LesOdrRequest {
 		return (*ReceiptsRequest)(r)
 	case *light.TrieRequest:
 		return (*TrieRequest)(r)
-	case *light.NodeDataRequest:
+	case *light.CodeRequest:
 		return (*CodeRequest)(r)
 	default:
 		return nil
@@ -176,7 +176,7 @@ func (self *TrieRequest) Valid(db ethdb.Database, msg *Msg) bool {
 }
 
 // ODR request type for node data (used for retrieving contract code), see access.ObjectAccess interface
-type CodeRequest light.NodeDataRequest
+type CodeRequest light.CodeRequest
 
 func (self *CodeRequest) Request(reqID uint64, peer *odrPeer) error {
 	glog.V(logger.Debug).Infof("ODR: requesting node data for hash %08x from peer %v", self.Hash[:4], peer.Id())

@@ -41,11 +41,11 @@ func retrieveContractCode(ctx context.Context, odr OdrBackend, id *TrieID, hash 
 	if res != nil {
 		return res, nil
 	}
-	r := &NodeDataRequest{Hash: hash}
+	r := &CodeRequest{Id: id, Hash: hash}
 	if err := odr.Retrieve(ctx, r); err != nil {
 		return nil, err
 	} else {
-		return r.GetData(), nil
+		return r.Data, nil
 	}
 }
 

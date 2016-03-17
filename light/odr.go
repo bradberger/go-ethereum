@@ -94,6 +94,17 @@ func storeProof(db ethdb.Database, proof []rlp.RawValue) {
 	}
 }
 
+type CodeRequest struct {
+	OdrRequest
+	Id    *TrieID
+	Hash common.Hash
+	Data []byte
+}
+
+func (req *CodeRequest) StoreResult(db ethdb.Database) {
+	db.Put(req.Hash[:], req.Data)
+}
+
 // NodeDataRequest is the ODR request type for node data (used for retrieving contract code)
 type NodeDataRequest struct {
 	OdrRequest
