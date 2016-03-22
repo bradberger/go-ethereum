@@ -73,6 +73,7 @@ func StorageTrieID(state *TrieID, addr common.Address, root common.Hash) *TrieID
 // TrieRequest is the ODR request type for state/storage trie entries
 type TrieRequest struct {
 	OdrRequest
+	Id    *TrieID
 	Root  common.Hash
 	Key   []byte
 	Proof []rlp.RawValue

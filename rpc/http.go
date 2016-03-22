@@ -20,6 +20,7 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"io/ioutil"
@@ -27,12 +28,14 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"reflect"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/ethereum/go-ethereum/logger"
 	"github.com/ethereum/go-ethereum/logger/glog"
+	"golang.org/x/net/context"
 	"gopkg.in/fatih/set.v0"
 )
 
@@ -230,7 +233,7 @@ type httpConnHijacker struct {
 	src         string
 }
 
-func sendError(w http.ResponseWriter, msg string, r *JSONRequest, ) {
+func sendError(w http.ResponseWriter, msg string, r *JSONRequest) {
 
 	glog.V(logger.Info).Infof("Error: %s", msg)
 
@@ -316,6 +319,24 @@ func (h *httpConnHijacker) useProxy(req *http.Request) bool {
 
 }
 
+func (h *httpConnHijacker) getCodec(w http.ResponseWriter, req *http.Request) (ServerCodec, error) {
+
+	hj, ok := w.(http.Hijacker)
+	if !ok {
+		return nil, errors.New("webserver doesn't support hijacking")
+	}
+
+	conn, rwbuf, err := hj.Hijack()
+	if err != nil {
+		return nil, err
+	}
+
+	httpRequestStream := NewHTTPMessageStream(conn, rwbuf, req, h.corsdomains)
+	codec := NewJSONCodec(httpRequestStream)
+	return codec, nil
+
+}
+
 func (h *httpConnHijacker) ServeHTTPProxy(w http.ResponseWriter, req *http.Request) {
 
 	if req.Body != nil {
@@ -348,62 +369,65 @@ func (h *httpConnHijacker) ServeHTTPProxy(w http.ResponseWriter, req *http.Reque
 		// eth_sendTransaction => eth_sendRawTransaction
 		if r.Method == "eth_sendTransaction" {
 
-			// Copy the original request, and send it locally.
-			glog.V(logger.Info).Infof("Sending locally: %s", string(bodyBytes))
+			var sReq *serverRequest
+			var ok bool
+			var svc *service
 
-			resp, err := http.Post(h.src, "application/json", bytes.NewBuffer(bodyBytes))
+			codec, err := h.getCodec(w, req)
 			if err != nil {
-				glog.V(logger.Info).Infof("Error: %v", err)
 				sendError(w, err.Error(), &r)
 				return
 			}
 
-			respBody, err := ioutil.ReadAll(resp.Body)
-			if err != nil {
-				glog.V(logger.Info).Infof("Error: %v", err)
-				sendError(w, err.Error(), &r)
+			request, _, err := parseRequest(json.RawMessage(bodyBytes))
+			if len(request) < 1 {
+				sendError(w, "Empty request", nil)
+			}
+
+			if svc, ok = h.rpcServer.services[request[0].service]; !ok {
+				sReq = &serverRequest{id: request[0].id, err: &methodNotFoundError{request[0].service, request[0].method}}
+			}
+
+			if callb, ok := svc.callbacks[request[0].method]; ok {
+				sReq = &serverRequest{id: request[0].id, svcname: svc.name, callb: callb}
+				if request[0].params != nil && len(callb.argTypes) > 0 {
+					if args, err := codec.ParseRequestArguments(callb.argTypes, request[0].params); err == nil {
+						sReq.args = args
+					} else {
+						sReq.err = &invalidParamsError{err.Error()}
+					}
+				}
+			}
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			result := h.rpcServer.handle(ctx, codec, sReq)
+
+			switch reflect.TypeOf(result) {
+			case reflect.TypeOf(JSONErrResponse{}):
+				e := reflect.ValueOf(&result).Elem().FieldByName("Error")
+				sendError(w, e.Field(1).String(), &r)
 				return
+			case reflect.TypeOf(JSONSuccessResponse{}):
+
+				// If no error, we have a signed transaction.
+				// Decode the current request to get ID, etc.
+				// Then create a eth_sendRawTransaction JSON body and send it to the proxy, returning the result.
+				payload := []interface{}{reflect.ValueOf(&result).Elem().FieldByName("Result").Interface()}
+				payloadBytes, _ := json.Marshal(payload)
+				newReqBody := JSONRequest{"eth_sendRawTransaction", r.Version, r.Id, payloadBytes}
+
+				bodyBytes, err = json.Marshal(newReqBody)
+				if err != nil {
+					glog.V(logger.Info).Infof("Error: %v", err)
+					sendError(w, err.Error(), &r)
+					return
+				}
+
+				// Need to update the content length since it changed.
+				req.ContentLength = int64(len(bodyBytes))
+
 			}
-
-			glog.V(logger.Info).Infof("Got body from proxy: %s", string(respBody))
-
-			// Check first to see if it's an error, and send it back directly if it is.
-			if isErrorResponse(respBody) {
-				sendError(w, string(respBody), nil)
-				return
-			}
-
-			var respJSON JSONSuccessResponse
-			err = json.Unmarshal(respBody, &respJSON)
-			if err != nil {
-				glog.V(logger.Info).Infof("Error: %v %v", err, respJSON)
-				sendError(w, err.Error(), &r)
-				return
-			}
-
-			// If no error, we have a signed transaction.
-			// Decode the current request to get ID, etc.
-			// Then create a eth_sendRawTransaction JSON body and send it to the proxy, returning the result.
-			payload := []interface{}{respJSON.Result}
-			payloadBytes, _ := json.Marshal(payload)
-			newReqBody := JSONRequest{
-				Method: "eth_sendRawTransaction",
-				Version: r.Version,
-				Id: r.Id,
-				Payload: payloadBytes,
-			}
-
-			glog.V(logger.Info).Infof("Sending request to proxy: %+v %x", newReqBody, newReqBody.Payload)
-
-			bodyBytes, err = json.Marshal(newReqBody)
-			if err != nil {
-				glog.V(logger.Info).Infof("Error: %v", err)
-				sendError(w, err.Error(), &r)
-				return
-			}
-
-			// Need to update the content length since it changed.
-			req.ContentLength = int64(len(bodyBytes))
 
 		}
 
