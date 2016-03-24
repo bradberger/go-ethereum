@@ -233,6 +233,10 @@ type httpConnHijacker struct {
 	src         string
 }
 
+func writeError(w ServerCodec, err interface{}) {
+	w.Write(err)
+}
+
 func sendError(w http.ResponseWriter, msg string, r *JSONRequest) {
 
 	glog.V(logger.Info).Infof("Error: %s", msg)
@@ -330,7 +334,6 @@ func (h *httpConnHijacker) getCodec(w http.ResponseWriter, req *http.Request) (S
 	if err != nil {
 		return nil, err
 	}
-
 	httpRequestStream := NewHTTPMessageStream(conn, rwbuf, req, h.corsdomains)
 	codec := NewJSONCodec(httpRequestStream)
 	return codec, nil
@@ -338,6 +341,8 @@ func (h *httpConnHijacker) getCodec(w http.ResponseWriter, req *http.Request) (S
 }
 
 func (h *httpConnHijacker) ServeHTTPProxy(w http.ResponseWriter, req *http.Request) {
+
+	glog.V(logger.Info).Infof("ServeHTTPProxy: %v", req)
 
 	if req.Body != nil {
 
@@ -373,15 +378,21 @@ func (h *httpConnHijacker) ServeHTTPProxy(w http.ResponseWriter, req *http.Reque
 			var ok bool
 			var svc *service
 
+			glog.V(logger.Info).Infof("Proxying eth_sendTransaction: %+v", req)
+
+			// @TODO Problem here is that getCodec hijacks the HTTP connection so which
+			// means we're on
 			codec, err := h.getCodec(w, req)
 			if err != nil {
+				glog.V(logger.Info).Infof("Error parsing request: %v", err)
 				sendError(w, err.Error(), &r)
 				return
 			}
 
 			request, _, err := parseRequest(json.RawMessage(bodyBytes))
 			if len(request) < 1 {
-				sendError(w, "Empty request", nil)
+				glog.V(logger.Info).Infof("Error parsing request: %v", err)
+				writeError(codec, "Empty request")
 			}
 
 			if svc, ok = h.rpcServer.services[request[0].service]; !ok {
@@ -403,10 +414,12 @@ func (h *httpConnHijacker) ServeHTTPProxy(w http.ResponseWriter, req *http.Reque
 			defer cancel()
 			result := h.rpcServer.handle(ctx, codec, sReq)
 
+			writeError(codec, result)
+
 			switch reflect.TypeOf(result) {
 			case reflect.TypeOf(JSONErrResponse{}):
-				e := reflect.ValueOf(&result).Elem().FieldByName("Error")
-				sendError(w, e.Field(1).String(), &r)
+				// e := reflect.ValueOf(&result).Elem().FieldByName("Error")
+				writeError(codec, result)
 				return
 			case reflect.TypeOf(JSONSuccessResponse{}):
 
@@ -417,10 +430,12 @@ func (h *httpConnHijacker) ServeHTTPProxy(w http.ResponseWriter, req *http.Reque
 				payloadBytes, _ := json.Marshal(payload)
 				newReqBody := JSONRequest{"eth_sendRawTransaction", r.Version, r.Id, payloadBytes}
 
+				glog.V(logger.Info).Infof("Sending: %x", payloadBytes)
+
 				bodyBytes, err = json.Marshal(newReqBody)
 				if err != nil {
 					glog.V(logger.Info).Infof("Error: %v", err)
-					sendError(w, err.Error(), &r)
+					writeError(codec, err.Error())
 					return
 				}
 
@@ -436,6 +451,7 @@ func (h *httpConnHijacker) ServeHTTPProxy(w http.ResponseWriter, req *http.Reque
 
 	}
 
+	// @TODO Since w is no longer useable, would have to proxy the request manually.
 	h.proxy.ServeHTTP(w, req)
 	return
 
@@ -449,6 +465,8 @@ func (h *httpConnHijacker) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		h.ServeHTTPProxy(w, req)
 		return
 	}
+
+	glog.V(logger.Info).Infof("ServeHTTP (no proxy): %v", req)
 
 	hj, ok := w.(http.Hijacker)
 	if !ok {
