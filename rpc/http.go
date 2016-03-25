@@ -20,7 +20,6 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"io/ioutil"
@@ -28,14 +27,12 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
-	"reflect"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/ethereum/go-ethereum/logger"
 	"github.com/ethereum/go-ethereum/logger/glog"
-	"golang.org/x/net/context"
 	"gopkg.in/fatih/set.v0"
 )
 
@@ -228,233 +225,7 @@ type httpConnHijacker struct {
 	corsdomains []string
 	rpcServer   *Server
 	proxy       *httputil.ReverseProxy
-	// src is where the node is listening at. It's only when we need to run commands
-	// locally before sending them to the proxy.
-	src         string
-}
-
-func writeError(w ServerCodec, err interface{}) {
-	w.Write(err)
-}
-
-func sendError(w http.ResponseWriter, msg string, r *JSONRequest) {
-
-	glog.V(logger.Info).Infof("Error: %s", msg)
-
-	if r != nil {
-		e := JSONErrResponse{r.Version, r.Id, JSONError{-32600, msg, nil}}
-		body, err := json.Marshal(e)
-		if err == nil {
-			http.Error(w, string(body), http.StatusBadRequest)
-			return
-		}
-	}
-
-	http.Error(w, msg, http.StatusBadRequest)
-
-}
-
-func sameAddr(src, dst string) (bool, error) {
-
-	prefixes := []string{"http://", "https://", "tcp://"}
-	for _, p := range prefixes {
-		src = strings.TrimPrefix(src, p)
-		dst = strings.TrimPrefix(dst, p)
-	}
-
-	local, _, err := net.SplitHostPort(src)
-	if err != nil {
-		local = src
-	}
-
-	remote, _, err := net.SplitHostPort(dst)
-	if err != nil {
-		remote = dst
-	}
-
-	localIP, err := net.LookupIP(local)
-	if err != nil {
-		return false, err
-	}
-
-	remoteIP, err := net.LookupIP(remote)
-	if err != nil {
-		return false, err
-	}
-
-	for _, l := range localIP {
-		for _, r := range remoteIP {
-			if bytes.Equal(l, r) {
-				return true, nil
-			}
-		}
-	}
-
-	return false, nil
-
-}
-
-func isErrorResponse(resp []byte) bool {
-	var jsonErr JSONError
-	err := json.Unmarshal(resp, &jsonErr)
-	return err == nil
-}
-
-func (h *httpConnHijacker) useProxy(req *http.Request) bool {
-
-	useProxy := h.proxy != nil && h.src != ""
-	if useProxy {
-
-		fromAddr := req.RemoteAddr
-		if req.Header.Get("X-Forwarded-For") != "" {
-			fromAddr = req.Header.Get("X-Forwarded-For")
-		}
-
-		same, err := sameAddr(h.src, fromAddr)
-		if err != nil {
-			return false
-		}
-
-		useProxy = !same
-
-	}
-
-	return useProxy
-
-}
-
-func (h *httpConnHijacker) getCodec(w http.ResponseWriter, req *http.Request) (ServerCodec, error) {
-
-	hj, ok := w.(http.Hijacker)
-	if !ok {
-		return nil, errors.New("webserver doesn't support hijacking")
-	}
-
-	conn, rwbuf, err := hj.Hijack()
-	if err != nil {
-		return nil, err
-	}
-	httpRequestStream := NewHTTPMessageStream(conn, rwbuf, req, h.corsdomains)
-	codec := NewJSONCodec(httpRequestStream)
-	return codec, nil
-
-}
-
-func (h *httpConnHijacker) ServeHTTPProxy(w http.ResponseWriter, req *http.Request) {
-
-	glog.V(logger.Info).Infof("ServeHTTPProxy: %v", req)
-
-	if req.Body != nil {
-
-		var r JSONRequest
-
-		bodyBytes, err := ioutil.ReadAll(req.Body)
-		if err != nil {
-			glog.V(logger.Info).Infof("Error: %v", err)
-			sendError(w, "Invalid body", nil)
-			return
-		}
-
-		if err := json.Unmarshal(bodyBytes, &r); err != nil {
-			glog.V(logger.Info).Infof("Error: %v", err)
-			sendError(w, "Invalid format", nil)
-			return
-		}
-
-		glog.V(logger.Info).Infof("Got body: %s", string(bodyBytes))
-
-		for _, m := range proxyDisabledMethods {
-			if r.Method == m {
-				glog.V(logger.Info).Infof("Error: %s", fmt.Sprintf("Method %s is disabled", m))
-				sendError(w, fmt.Sprintf("%s is disabled", m), &r)
-				return
-			}
-		}
-
-		// eth_sendTransaction => eth_sendRawTransaction
-		if r.Method == "eth_sendTransaction" {
-
-			var sReq *serverRequest
-			var ok bool
-			var svc *service
-
-			glog.V(logger.Info).Infof("Proxying eth_sendTransaction: %+v", req)
-
-			// @TODO Problem here is that getCodec hijacks the HTTP connection so which
-			// means we're on
-			codec, err := h.getCodec(w, req)
-			if err != nil {
-				glog.V(logger.Info).Infof("Error parsing request: %v", err)
-				sendError(w, err.Error(), &r)
-				return
-			}
-
-			request, _, err := parseRequest(json.RawMessage(bodyBytes))
-			if len(request) < 1 {
-				glog.V(logger.Info).Infof("Error parsing request: %v", err)
-				writeError(codec, "Empty request")
-			}
-
-			if svc, ok = h.rpcServer.services[request[0].service]; !ok {
-				sReq = &serverRequest{id: request[0].id, err: &methodNotFoundError{request[0].service, request[0].method}}
-			}
-
-			if callb, ok := svc.callbacks[request[0].method]; ok {
-				sReq = &serverRequest{id: request[0].id, svcname: svc.name, callb: callb}
-				if request[0].params != nil && len(callb.argTypes) > 0 {
-					if args, err := codec.ParseRequestArguments(callb.argTypes, request[0].params); err == nil {
-						sReq.args = args
-					} else {
-						sReq.err = &invalidParamsError{err.Error()}
-					}
-				}
-			}
-
-			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
-			result := h.rpcServer.handle(ctx, codec, sReq)
-
-			writeError(codec, result)
-
-			switch reflect.TypeOf(result) {
-			case reflect.TypeOf(JSONErrResponse{}):
-				// e := reflect.ValueOf(&result).Elem().FieldByName("Error")
-				writeError(codec, result)
-				return
-			case reflect.TypeOf(JSONSuccessResponse{}):
-
-				// If no error, we have a signed transaction.
-				// Decode the current request to get ID, etc.
-				// Then create a eth_sendRawTransaction JSON body and send it to the proxy, returning the result.
-				payload := []interface{}{reflect.ValueOf(&result).Elem().FieldByName("Result").Interface()}
-				payloadBytes, _ := json.Marshal(payload)
-				newReqBody := JSONRequest{"eth_sendRawTransaction", r.Version, r.Id, payloadBytes}
-
-				glog.V(logger.Info).Infof("Sending: %x", payloadBytes)
-
-				bodyBytes, err = json.Marshal(newReqBody)
-				if err != nil {
-					glog.V(logger.Info).Infof("Error: %v", err)
-					writeError(codec, err.Error())
-					return
-				}
-
-				// Need to update the content length since it changed.
-				req.ContentLength = int64(len(bodyBytes))
-
-			}
-
-		}
-
-		// Restore the io.ReadCloser to its original state
-		req.Body = ioutil.NopCloser(bytes.NewBuffer(bodyBytes))
-
-	}
-
-	// @TODO Since w is no longer useable, would have to proxy the request manually.
-	h.proxy.ServeHTTP(w, req)
-	return
-
+	proxyURL    *url.URL
 }
 
 // ServeHTTP will hijack the connection, wraps the captured connection in a
@@ -465,8 +236,6 @@ func (h *httpConnHijacker) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		h.ServeHTTPProxy(w, req)
 		return
 	}
-
-	glog.V(logger.Info).Infof("ServeHTTP (no proxy): %v", req)
 
 	hj, ok := w.(http.Hijacker)
 	if !ok {
@@ -492,18 +261,6 @@ func NewHTTPServer(cors string, handler *Server) *http.Server {
 		Handler: &httpConnHijacker{
 			corsdomains: strings.Split(cors, ","),
 			rpcServer:   handler,
-		},
-	}
-}
-
-// NewHTTPProxyServer creates a new HTTP RPC server proxy around an API provider.
-func NewHTTPProxyServer(target *url.URL, src string, cors string, handler *Server) *http.Server {
-	return &http.Server{
-		Handler: &httpConnHijacker{
-			corsdomains: strings.Split(cors, ","),
-			rpcServer:   handler,
-			proxy:       httputil.NewSingleHostReverseProxy(target),
-			src:         src,
 		},
 	}
 }

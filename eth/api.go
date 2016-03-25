@@ -1077,6 +1077,55 @@ type SendTxArgs struct {
 	Nonce    *rpc.HexNumber `json:"nonce"`
 }
 
+func (s *PublicTransactionPoolAPI) SignTransactionLocal(ctx context.Context, args SendTxArgs) (common.Hash, error) {
+
+	if args.Gas == nil {
+		args.Gas = rpc.NewHexNumber(defaultGas)
+	}
+	if args.GasPrice == nil {
+		args.GasPrice = rpc.NewHexNumber(s.b.SuggestPrice())
+	}
+	if args.Value == nil {
+		args.Value = rpc.NewHexNumber(0)
+	}
+
+	s.txMu.Lock()
+	defer s.txMu.Unlock()
+
+	if args.Nonce == nil {
+		nonce, err := s.b.GetPoolNonce(ctx, args.From)
+		if err != nil {
+			return common.Hash{}, err
+		}
+		args.Nonce = rpc.NewHexNumber(nonce)
+	}
+
+	var tx *types.Transaction
+	contractCreation := (args.To == common.Address{})
+
+	if contractCreation {
+		tx = types.NewContractCreation(args.Nonce.Uint64(), args.Value.BigInt(), args.Gas.BigInt(), args.GasPrice.BigInt(), common.FromHex(args.Data))
+	} else {
+		tx = types.NewTransaction(args.Nonce.Uint64(), args.To, args.Value.BigInt(), args.Gas.BigInt(), args.GasPrice.BigInt(), common.FromHex(args.Data))
+	}
+
+	signedTx, err := s.sign(args.From, tx)
+	if err != nil {
+		return common.Hash{}, err
+	}
+
+	if contractCreation {
+		addr := crypto.CreateAddress(args.From, args.Nonce.Uint64())
+		glog.V(logger.Info).Infof("Tx(%s) created: %s\n", signedTx.Hash().Hex(), addr.Hex())
+	} else {
+		glog.V(logger.Info).Infof("Tx(%s) to: %s\n", signedTx.Hash().Hex(), tx.To().Hex())
+	}
+
+	return signedTx.Hash(), nil
+
+
+}
+
 // SendTransaction will create a transaction for the given transaction argument, sign it and submit it to the
 // transaction pool.
 func (s *PublicTransactionPoolAPI) SendTransaction(ctx context.Context, args SendTxArgs) (common.Hash, error) {
