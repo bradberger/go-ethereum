@@ -366,7 +366,7 @@ func (n *Node) startHTTP(endpoint string, apis []rpc.API, modules []string, cors
 			return err
 		}
 		glog.V(logger.Info).Infof("HTTP using proxy: %+v", target)
-		go rpc.NewHTTPProxyServer(target, "http://" + endpoint, cors, handler).Serve(listener)
+		go rpc.NewHTTPProxyServer(target, cors, handler).Serve(listener)
 	} else {
 		go rpc.NewHTTPServer(cors, handler).Serve(listener)
 	}
