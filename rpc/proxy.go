@@ -149,8 +149,8 @@ func (h *httpConnHijacker) doRequest(codec ServerCodec, data []byte) (interface{
 	}
 
     // If the result is an error, we'll also return a error variable with the error message.
-	if reflect.TypeOf(result) == reflect.TypeOf(&JSONErrResponse{}) {
-		return result, errors.New(reflect.ValueOf(&result).Elem().FieldByName("Message").String())
+	if result != nil && reflect.TypeOf(result) == reflect.TypeOf(&JSONErrResponse{}) {
+		return result, errors.New(reflect.ValueOf(result).Elem().FieldByName("Message").String())
 	}
 
 	return result, nil
