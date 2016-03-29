@@ -200,6 +200,8 @@ func (h *httpConnHijacker) ServeHTTPProxy(w http.ResponseWriter, req *http.Reque
 				return
 			}
 
+			glog.V(logger.Info).Infof("eth_signTransactionLocal result: %+v", in)
+
             // Examine the type of the result, and handle accordingly.
 			switch reflect.TypeOf(result) {
             // If the result from the local server was an error, return it to the client now.
@@ -208,10 +210,11 @@ func (h *httpConnHijacker) ServeHTTPProxy(w http.ResponseWriter, req *http.Reque
 				return
             // If no error, we have a locally signed transaction, so create a eth_sendRawTransaction request, send it to the proxy, and write the result.
 			case reflect.TypeOf(&JSONSuccessResponse{}):
-				payload := []interface{}{reflect.ValueOf(&result).Elem().FieldByName("Result").Interface()}
+				payload := []interface{}{reflect.ValueOf(result).Elem().FieldByName("Result").Interface()}
 				payloadBytes, _ := json.Marshal(payload)
 				rawTx := JSONRequest{"eth_sendRawTransaction", in.Version, in.Id, payloadBytes}
-				codec.Write(h.SendExternal(rawTx))
+				result := h.SendExternal(&rawTx)
+				codec.Write(result)
 				return
 			}
 
@@ -230,7 +233,7 @@ func (h *httpConnHijacker) ServeHTTPProxy(w http.ResponseWriter, req *http.Reque
 }
 
 // SendExternal routes the parameters to the upstream proxy server and returns the results.
-func (h *httpConnHijacker) SendExternal(in interface{}) interface{} {
+func (h *httpConnHijacker) SendExternal(in *JSONRequest) interface{} {
 	var resp interface{}
 	c, err := h.getExternalClient()
 	if err != nil {
