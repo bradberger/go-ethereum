@@ -17,6 +17,28 @@ import (
 	"golang.org/x/net/context"
 )
 
+type SignTransactionResult struct {
+	JsonRPC string   `json:"jsonrpc"`
+	ID      int64    `json:"id"`
+	Result  TxResult `json:"result"`
+}
+
+type TxResult struct {
+	Raw string `json:"raw"`
+	Tx  Tx     `json:"tx"`
+}
+
+type Tx struct {
+	To       string `json:"to"`
+	From     string `json:"from"`
+	Nonce    string `json:"nonce"`
+	Value    string `json:"value"`
+	Data     string `json:"data"`
+	GasLimit string `json:"gas"`
+	GasPrice string `json:"gasPrice"`
+	Hash     string `json:"hash"`
+}
+
 // NewHTTPProxyServer creates a new HTTP RPC server proxy around an API provider.
 func NewHTTPProxyServer(target *url.URL, cors string, handler *Server) *http.Server {
 	return &http.Server{
@@ -34,12 +56,10 @@ func writeResult(w ServerCodec, val interface{}) {
 }
 
 func writeError(w ServerCodec, err interface{}) {
-	glog.V(logger.Info).Infof("Error: %+v\n", err)
 	w.Write(err)
 }
 
 func writeErrorMsg(w ServerCodec, err error, in *JSONRequest) {
-	glog.V(logger.Info).Infof("Error: %v\n", err)
 	if in != nil {
 		w.Write(JSONErrResponse{in.Version, in.Id, JSONError{-32600, err.Error(), nil}})
 		return
@@ -49,7 +69,6 @@ func writeErrorMsg(w ServerCodec, err error, in *JSONRequest) {
 
 // sendError writes a formatted JSON-RPC error
 func sendError(w http.ResponseWriter, msg string, r *JSONRequest) {
-	glog.V(logger.Info).Infof("Error: %s\n", msg)
 	if r != nil {
 		e := JSONErrResponse{r.Version, r.Id, JSONError{-32600, msg, nil}}
 		body, err := json.Marshal(e)
@@ -110,7 +129,6 @@ func (h *httpConnHijacker) doRequest(codec ServerCodec, data []byte) (interface{
 
 	request, _, err := parseRequest(json.RawMessage(data))
 	if len(request) < 1 {
-		glog.V(logger.Debug).Infof("Error parsing request: %v\n", err)
 		return request, err
 	}
 
@@ -200,8 +218,6 @@ func (h *httpConnHijacker) ServeHTTPProxy(w http.ResponseWriter, req *http.Reque
 				return
 			}
 
-			glog.V(logger.Info).Infof("eth_signTransactionLocal result: %+v", in)
-
             // Examine the type of the result, and handle accordingly.
 			switch reflect.TypeOf(result) {
             // If the result from the local server was an error, return it to the client now.
@@ -210,16 +226,19 @@ func (h *httpConnHijacker) ServeHTTPProxy(w http.ResponseWriter, req *http.Reque
 				return
             // If no error, we have a locally signed transaction, so create a eth_sendRawTransaction request, send it to the proxy, and write the result.
 			case reflect.TypeOf(&JSONSuccessResponse{}):
-				payload := []interface{}{reflect.ValueOf(result).Elem().FieldByName("Result").Interface()}
-				payloadBytes, _ := json.Marshal(payload)
-				rawTx := JSONRequest{"eth_sendRawTransaction", in.Version, in.Id, payloadBytes}
+				tx := &SignTransactionResult{}
+				b, _ := json.Marshal(result)
+				err := json.Unmarshal(b, &tx)
+				if err != nil {
+					writeError(codec, err)
+				}
+				rawTx := JSONRequest{"eth_sendRawTransaction", in.Version, in.Id, json.RawMessage([]byte("[\"" + tx.Result.Raw +  "\"]"))}
 				result := h.SendExternal(&rawTx)
 				codec.Write(result)
 				return
 			}
 
 			// Should never get here, as previous results would have to be JSONErrResponse or JSONSuccessResponse, but just in case.
-            glog.V(logger.Info).Infof("Unexpected response [%v]: %+v", reflect.TypeOf(result), result)
 			writeErrorMsg(codec, errors.New("Unexpected upstream response"), in)
 			return
 

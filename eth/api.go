@@ -1077,7 +1077,7 @@ type SendTxArgs struct {
 	Nonce    *rpc.HexNumber `json:"nonce"`
 }
 
-func (s *PublicTransactionPoolAPI) SignTransactionLocal(ctx context.Context, args SendTxArgs) (common.Hash, error) {
+func (s *PublicTransactionPoolAPI) SignTransactionLocal(ctx context.Context, args SendTxArgs) (*SignTransactionResult, error) {
 
 	if args.Gas == nil {
 		args.Gas = rpc.NewHexNumber(defaultGas)
@@ -1095,7 +1095,7 @@ func (s *PublicTransactionPoolAPI) SignTransactionLocal(ctx context.Context, arg
 	if args.Nonce == nil {
 		nonce, err := s.b.GetPoolNonce(ctx, args.From)
 		if err != nil {
-			return common.Hash{}, err
+			return nil, err
 		}
 		args.Nonce = rpc.NewHexNumber(nonce)
 	}
@@ -1111,7 +1111,7 @@ func (s *PublicTransactionPoolAPI) SignTransactionLocal(ctx context.Context, arg
 
 	signedTx, err := s.sign(args.From, tx)
 	if err != nil {
-		return common.Hash{}, err
+		return nil, err
 	}
 
 	if contractCreation {
@@ -1121,8 +1121,12 @@ func (s *PublicTransactionPoolAPI) SignTransactionLocal(ctx context.Context, arg
 		glog.V(logger.Info).Infof("Tx(%s) to: %s\n", signedTx.Hash().Hex(), tx.To().Hex())
 	}
 
-	return signedTx.Hash(), nil
+	data, err := rlp.EncodeToBytes(signedTx)
+	if err != nil {
+		return nil, err
+	}
 
+	return &SignTransactionResult{"0x" + common.Bytes2Hex(data), newTx(tx)}, nil
 
 }
 
